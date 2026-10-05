@@ -154,7 +154,7 @@ def test_pubchem_live():
     assert 'unspecified' in racemic['warning']
     l_form = asyncio.run(resolve_name('L-lactic acid', allow_network=True))
     assert l_form['source'].startswith('OPSIN') and l_form['analysis']['stereocenters'][0]['cip'] == 'S'  # read offline
-    glucose = asyncio.run(resolve_name('glucose', allow_network=True))
+    glucose = asyncio.run(resolve_name('D-glucose', allow_network=True))
     assert glucose['stereo_summary']['status'] == 'partially specified'
     with pytest.raises(ValueError, match='not found in MolTalk'):
         asyncio.run(resolve_name('not_a_real_chemical_xyz', allow_network=True))

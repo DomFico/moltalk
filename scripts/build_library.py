@@ -6,6 +6,8 @@ Sources:
     definition of "commonly discussed". Gives the English label, aliases and how many Wikipedias cover it.
   * scripts/library_seed_names.txt: common teaching names (sugars, cofactors, reagents...) that have no English
     Wikipedia article of their own; each is resolved to a CID with PubChem's name service.
+  * scripts/library_curated.json: editorial overrides for messy names (heme vs hemin, NAD+/NADH, FAD/FADH2, CoA,
+    ATP...): pinned CID, corrected title and a note returned with the structure.
   * PubChem (NCBI): isomeric SMILES, standard InChIKey, title, IUPAC name (OpenEye Lexichem) and leading synonyms.
 Verification (an entry is dropped if a check fails):
   * RDKit parses PubChem's SMILES and recomputes the same standard InChIKey PubChem reports.
@@ -46,6 +48,7 @@ UA = "MolTalk-library-builder/1.0 (https://github.com/DomFico/moltalk)"
 MAX_HEAVY = 150
 SYNONYMS_PER_COMPOUND = 8
 SEEDS = ROOT / "scripts" / "library_seed_names.txt"
+CURATED = ROOT / "scripts" / "library_curated.json"
 REGISTRY = re.compile(r"^(\d{2,7}-\d{2}-\d|\d{3}-\d{3}-\d|RefChem:.*|[A-Z]{2,}[-_ ]?\d+|UNII-.*|CHEBI:\d+|CHEMBL\d+|DTXSID\d+|EINECS.*|NSC[- ]?\d+|"
                       r"SCHEMBL\d+|ZINC\d+|AKOS\d+|MFCD\d+|HSDB.*|BRN .*|CCRIS .*|.*[0-9A-Z]{8,}.*)$")
 
@@ -182,6 +185,11 @@ def main():
     seeds = defaultdict(set)
     seed_names = [l.strip() for l in SEEDS.read_text().splitlines() if l.strip() and not l.startswith("#")]
     log(f"PubChem CIDs for {len(seed_names)} seed names")
+    curated = {e["cid"]: e for e in json.loads(CURATED.read_text())["entries"]}
+    curated_names = {normalise(n) for e in curated.values() for n in e["names"]}
+    for cid, e in curated.items():
+        seeds[cid] |= set(e["names"])
+    seed_names = [l for l in seed_names if normalise(l.partition("|")[0]) not in curated_names]  # curation wins
     missing = seed_names
     for attempt in range(3):  # PubChem's name service sometimes answers 404 for names it knows: ask again later
         if attempt:
@@ -231,11 +239,16 @@ def main():
         if row.get("Title"):
             label.add(row["Title"])
         names = seed | label | alias | set(synonyms.get(cid, []))
-        compounds.append({"cid": cid, "title": row.get("Title") or (sorted(names)[0] if names else str(cid)),
+        title = row.get("Title") or (sorted(names)[0] if names else str(cid))
+        if cid in curated:
+            title = curated[cid]["title"]
+            label.add(title)
+        compounds.append({"cid": cid, "title": title,
                           "smiles": smiles, "inchikey": key, "iupac": row.get("IUPACName"), "links": links,
                           "seed": sorted(seed), "label": sorted(label),
                           "alias": sorted({n for n in alias if 0 < len(n) <= 120}),
-                          "names": sorted({n for n in names if 0 < len(n) <= 120})})
+                          "names": sorted({n for n in names if 0 < len(n) <= 120}),
+                          **({"curated": True, "note": curated[cid]["note"]} if cid in curated else {})})
     log(f"  kept {len(compounds)}; dropped {dict(dropped)}")
 
     log("OPSIN verification of IUPAC names and parent locants")

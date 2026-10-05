@@ -10,7 +10,7 @@ from .chemistry import analyze, draw, conformer, substructure, enumerate_stereo
 from .limits import runner
 from .naming import name_and_locants, pubchem_slot
 
-WIDGET_URI = "ui://widget/molecule-v15.html"
+WIDGET_URI = "ui://widget/molecule-v16.html"
 WIDGET_MIME = "text/html;profile=mcp-app"
 WIDGET_HTML = files("moltalk").joinpath("widget/molecule.html").read_text(encoding="utf-8")
 
@@ -22,7 +22,9 @@ INSTRUCTIONS = """RDKit chemistry tools. Workflow rules:
 - Explain wedges/dashes only from depicted_stereo_bonds of that drawing; wedge/dash is not a synonym for R/S.
 - If draw_molecule's depiction has method 'schlegel' or a warning, tell the user what that means for the picture before describing it.
 - For follow-up questions about the same molecule, reuse the canonical_smiles from the earlier result instead of re-deriving it.
-- If a tool returns an error, report it; never substitute or invent a different structure."""
+- If a tool returns an error, report it; never substitute or invent a different structure.
+- If resolve_name cannot resolve a name (unknown, ambiguous, or stereo not stated), do not write a SMILES for it from memory. Tell the user what the tool said and ask for a structure, a SMILES or a more specific name. Only if the user then asks you to proceed from your own knowledge may you write the SMILES; say plainly that it is unverified by MolTalk.
+- When you pass label= to draw_molecule, use the compound's name only if the SMILES came from resolve_name for that name (or the user gave it). draw_molecule checks the label against MolTalk's library: if label_check.status is "mismatch", the drawing is NOT that compound; say so and do not present it under that name."""
 
 HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8000"))
@@ -71,7 +73,7 @@ async def draw_molecule(smiles: str, label: str | None = None, width: int = 640,
         raise ValueError('numbering must be "iupac", "indices" or "none".')
     if not atom_indices:
         numbering = "none"
-    await runner.run(analyze, smiles)  # validate first, so an invalid structure is never sent to PubChem
+    checked = await runner.run(analyze, smiles)  # validate first, so an invalid structure is never sent to PubChem
     naming = await name_and_locants(smiles, runner.run)
     locants = naming["locants"] if numbering == "iupac" else None
     shown = "iupac" if locants else ("none" if numbering == "none" else "indices")
@@ -85,7 +87,8 @@ async def draw_molecule(smiles: str, label: str | None = None, width: int = 640,
             centre["locant"] = naming["locants"][str(centre["atom_index"])]
     structured = {"kind": "molecule", "label": label[:120] if label else None, "input_smiles": smiles,
                   "numbering_requested": numbering, "numbering_shown": shown, "atom_indices_shown": shown != "none",
-                  "hydrogens_shown": hydrogens, **naming, **result}
+                  "hydrogens_shown": hydrogens, "label_check": _check_label(label, checked["inchikey"]),
+                  **naming, **result}
     if include_svg:
         structured["svg"] = svg
     centers = ", ".join((f"C{c['locant']} (atom {c['atom_index']})" if c.get("locant") else f"atom {c['atom_index']}") + f" {c['cip']}"
@@ -97,6 +100,11 @@ async def draw_molecule(smiles: str, label: str | None = None, width: int = 640,
                       else f"Locants not shown: {naming['locant_status']}. " if naming["locant_status"] else "")
     else:
         name_text = f"No IUPAC name: {naming['name_status']}. "
+    check = structured["label_check"]
+    if check and check["status"] == "mismatch":
+        name_text = f"WARNING: {check['message']} " + name_text
+    elif check and check["status"] == "stereo differs":
+        name_text = f"Note: {check['message']} " + name_text
     text = (f"Drew {label or a['canonical_smiles']} ({a['formula']}); canonical SMILES {a['canonical_smiles']}. " + name_text +
             f"CIP centers (zero-based input indices): {centers}. Stereo: {a['stereo_summary']['status']}. "
             f"Drawing: {wedges} Functional-group motifs: {', '.join(a['functional_groups']) or 'none matched'}.")
@@ -109,6 +117,30 @@ async def draw_molecule(smiles: str, label: str | None = None, width: int = 640,
         text += " " + depiction["coordination_note"]
     return CallToolResult(content=[TextContent(type="text", text=text)], structuredContent=structured,
                           _meta={"svg": svg, "width": width, "height": height, "atom_px": atom_px, "bonds": drawn_bonds})
+
+def _check_label(label: str | None, inchikey: str) -> dict | None:
+    """Is the caption the name of the structure drawn? Checked against MolTalk's library (connectivity, then stereo),
+    so a model-written SMILES shown under a compound's name is caught. None when there is no label."""
+    from . import library
+    if not label:
+        return None
+    status, found = library.find_name(label)
+    candidates = [found] if status == "hit" else (found or [])
+    if not candidates:
+        return {"status": "unverified",
+                "message": f"'{label[:120]}' is not a name in MolTalk's library, so the label was not checked against the structure."}
+    same = [c for c in candidates if c["inchikey"][:14] == inchikey[:14]]
+    if not same:
+        c = candidates[0]
+        return {"status": "mismatch", "library_cid": c["cid"], "library_smiles": c["smiles"],
+                "message": f"The label '{label[:120]}' names {c['title']} (PubChem CID {c['cid']}, SMILES {c['smiles']}) "
+                           "in MolTalk's library, but the structure drawn is a different compound."}
+    if not any(c["inchikey"][:23] == inchikey[:23] for c in same):  # first two blocks: connectivity + stereo/isotopes
+        c = same[0]
+        return {"status": "stereo differs", "library_cid": c["cid"], "library_smiles": c["smiles"],
+                "message": f"Same connectivity as {c['title']} (PubChem CID {c['cid']}), but different or unspecified stereochemistry."}
+    return {"status": "matches", "library_cid": same[0]["cid"],
+            "message": f"The structure matches {same[0]['title']} (PubChem CID {same[0]['cid']})."}
 
 @mcp.tool(annotations=READ_ONLY, meta={"ui": {"visibility": ["app"]}, "openai/widgetAccessible": True,
                                        "openai/visibility": "private"})
@@ -151,6 +183,11 @@ async def resolve_name(name: str, allow_network: bool = False) -> dict[str, Any]
         options = "; ".join(f"{c['title']} (PubChem CID {c['cid']}, SMILES {c['smiles']})" for c in found[:6])
         raise ValueError(f"'{name}' names more than one structure in MolTalk's library: {options}. "
                          "No structure was chosen; ask which one is meant, or use a SMILES or a stereo-specific name.")
+    if status == "stereo":
+        options = "; ".join(f"{c['title']} (PubChem CID {c['cid']}, SMILES {c['smiles']})" for c in found[:6])
+        raise ValueError(f"'{name}' does not say which stereoisomer is meant (MolTalk's library: {options}). "
+                         "No stereoisomer was chosen; ask which one is meant, then resolve that name (e.g. "
+                         + " or ".join(f"'{c['title']}'" for c in found[:3]) + ").")
     if status == "hit":
         analysis = await runner.run(analyze, found["smiles"])
         result = {"source": "MolTalk library (from PubChem, names from Wikidata/PubChem)", "query": name,
@@ -159,6 +196,8 @@ async def resolve_name(name: str, allow_network: bool = False) -> dict[str, Any]
                   "pubchem_url": f"https://pubchem.ncbi.nlm.nih.gov/compound/{found['cid']}",
                   "canonical_smiles": analysis["canonical_smiles"], "stereo_summary": analysis["stereo_summary"],
                   "analysis": analysis}
+        if found.get("note"):
+            result["note"] = found["note"]  # curated: e.g. heme b vs hemin, protonation states of cofactors
         if analysis["stereo_summary"]["unspecified"]:
             result["warning"] = (f"This record leaves {analysis['stereo_summary']['unspecified']} stereo element(s) "
                                  "unspecified; the name does not identify a single stereoisomer.")

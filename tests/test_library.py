@@ -68,3 +68,45 @@ def test_novel_structures_get_no_name(monkeypatch):
     novel = asyncio.run(naming.name_and_locants("CC(C)(F)C1CC(Br)C(O)C1C#N", _run))
     assert novel["iupac_name"] is None and not novel["locants"]
     assert "library" in novel["name_status"]
+
+
+@pytest.mark.parametrize("name", ["alanine", "serine", "glucose", "fructose"])
+def test_bare_stereo_family_names_are_not_resolved_to_one_isomer(name):
+    with pytest.raises(ValueError, match="does not say which stereoisomer"):
+        asyncio.run(resolve_name(name))
+
+
+@pytest.mark.parametrize("name, cip", [("L-alanine", "S"), ("D-alanine", "R")])
+def test_qualified_amino_acids_resolve(name, cip):
+    result = asyncio.run(resolve_name(name))
+    assert [c["cip"] for c in result["analysis"]["stereocenters"]] == [cip]
+
+
+def test_named_natural_products_keep_their_enantiomer():
+    assert asyncio.run(resolve_name("morphine"))["source"].startswith("MolTalk library")  # (+)-morphine is not "morphine"
+
+
+@pytest.mark.parametrize("name, cid, title, formula", [
+    ("heme", 4973, "Heme b", "C34H32FeN4O4"), ("haem", 4973, "Heme b", "C34H32FeN4O4"),
+    ("hemin", 455658, "Hemin", "C34H32ClFeN4O4"), ("NAD", 5892, "NAD+", "C21H27N7O14P2"),
+    ("NAD+", 5892, "NAD+", "C21H27N7O14P2"), ("NADH", 439153, "NADH", "C21H29N7O14P2"),
+    ("FADH2", 446013, "FADH2", "C27H35N9O15P2"), ("CoA", 87642, "Coenzyme A", "C21H36N7O16P3S"),
+])
+def test_curated_cofactors(name, cid, title, formula):
+    result = asyncio.run(resolve_name(name))
+    assert result["cid"] == cid and result["title"].startswith(title) and result["analysis"]["formula"] == formula
+    assert result["note"]
+
+
+def _draw(smiles, label):
+    from moltalk.server import draw_molecule
+    return asyncio.run(draw_molecule(smiles, label=label)).structuredContent["label_check"]
+
+
+def test_draw_label_is_checked_against_the_library(monkeypatch):
+    monkeypatch.setattr(naming, "OFFLINE", True)
+    assert _draw("CC(C)Cc1ccc(cc1)C(C)C(=O)O", "ibuprofen")["status"] == "matches"
+    wrong = _draw("Cn1cnc2c1c(=O)[nH]c(=O)n2C", "caffeine")  # theobromine drawn under caffeine's name
+    assert wrong["status"] == "mismatch" and wrong["library_cid"] == 2519
+    assert _draw("C[C@@H](C(=O)O)N", "D-alanine")["status"] == "stereo differs"  # this SMILES is L-alanine
+    assert _draw("CC(C)(F)C1CC(Br)C(O)C1C#N", "my compound")["status"] == "unverified"

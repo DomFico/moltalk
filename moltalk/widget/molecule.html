@@ -362,6 +362,9 @@
       }
       details.append(el("h2", {}, "Wedges and dashes in the flat drawing"), list);
     }
+    const check = data.label_check;
+    if (check && check.status === "mismatch") details.prepend(el("p", { class: "note warn-text" }, el("strong", {}, "Not this compound. "), check.message));
+    else if (check && check.status === "stereo differs") details.prepend(el("p", { class: "note warn-text" }, el("strong", {}, "Stereo differs. "), check.message));
     const depiction = data.depiction || {};
     if (depiction.note) details.append(el("p", { class: "note" }, el("strong", {}, "Schlegel diagram. "), depiction.note));
     if (depiction.warning) details.append(el("p", { class: "note warn-text" }, el("strong", {}, "Layout caveat. "), depiction.warning));

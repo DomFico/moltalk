@@ -420,3 +420,51 @@ ketamine
 lidocaine
 procaine
 benzocaine
+# Stereo families: D- and DL- forms, so a bare amino-acid or sugar name is reported as not choosing one
+D-alanine
+DL-alanine
+D-valine
+DL-valine
+D-leucine
+DL-leucine
+D-isoleucine
+DL-isoleucine
+D-proline
+DL-proline
+D-phenylalanine
+DL-phenylalanine
+D-tryptophan
+DL-tryptophan
+D-methionine
+DL-methionine
+D-serine
+DL-serine
+D-threonine
+DL-threonine
+D-cysteine
+DL-cysteine
+D-tyrosine
+DL-tyrosine
+D-asparagine
+DL-asparagine
+D-glutamine
+DL-glutamine
+D-aspartic acid
+DL-aspartic acid
+D-glutamic acid
+DL-glutamic acid
+D-lysine
+DL-lysine
+D-arginine
+DL-arginine
+D-histidine
+DL-histidine
+L-fructose
+L-galactose
+L-mannose
+L-ribose
+L-xylose
+L-arabinose
+D-xylose
+D-arabinose
+L-glyceraldehyde
