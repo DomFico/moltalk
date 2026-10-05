@@ -226,3 +226,18 @@ Indices are zero-based **input-SMILES** atom indices, not IUPAC locants and not 
 RDKit does not parse IUPAC names. The offline dictionary covers water, ethanol, acetone, benzene, acetic acid, aspirin and caffeine; other names need PubChem, and PubChem records may leave stereochemistry unspecified. For example, "lactic acid" (CID 612) is unspecified and "glucose" (CID 5793) is partially specified. That status is reported explicitly in `stereo_summary` and the warning. logP is a calculated estimate. Functional groups come from a small SMARTS motif dictionary (ester oxygens are not reported as ethers) plus aromatic-ring detection; this is not an exhaustive classification. Not supported: reaction prediction, conformer energies, chair conformations, structure editing, general IUPAC parsing.
 
 Sources: [OpenAI plugins: connect and test](https://developers.openai.com/plugins/deploy/connect-chatgpt), [Add UI to your MCP server](https://developers.openai.com/plugins/build/chatgpt-ui), [Plugins reference](https://developers.openai.com/plugins/reference), [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), [Developer mode](https://developers.openai.com/api/docs/guides/developer-mode), [openai/tunnel-client](https://github.com/openai/tunnel-client), [RDKit](https://www.rdkit.org/docs/), [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk).
+
+## License
+
+MolTalk is open source under the [MIT License](LICENSE).
+
+It builds on:
+- [RDKit](https://www.rdkit.org/) (BSD 3-Clause)
+- the [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) (MIT)
+
+`scripts/fetch-tools.sh` downloads, but the repository does not include:
+- [OPSIN](https://github.com/dan2097/opsin) (MIT)
+- OpenAI's [tunnel-client](https://github.com/openai/tunnel-client), under its own licence
+
+Chemical names come from [PubChem](https://pubchem.ncbi.nlm.nih.gov/) (NCBI); see their [policies](https://www.ncbi.nlm.nih.gov/home/about/policies/).
+
