@@ -31,6 +31,19 @@ LOCANT = re.compile(r"^(\d+)([a-z]?)$")
 BOND = {"1": Chem.BondType.SINGLE, "2": Chem.BondType.DOUBLE, "3": Chem.BondType.TRIPLE, "S": Chem.BondType.SINGLE,
         "D": Chem.BondType.DOUBLE, "T": Chem.BondType.TRIPLE, "A": Chem.BondType.AROMATIC}
 _names: dict[str, list] = {}
+_pubchem_lock = asyncio.Lock()
+_pubchem_last = 0.0
+PUBCHEM_MIN_INTERVAL_S = 0.25  # at most 4 requests per second (PubChem asks for no more than 5)
+
+
+async def pubchem_slot():
+    """Wait for our turn so the whole server stays under PubChem's request-rate limit."""
+    global _pubchem_last
+    async with _pubchem_lock:
+        wait = _pubchem_last + PUBCHEM_MIN_INTERVAL_S - asyncio.get_running_loop().time()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _pubchem_last = asyncio.get_running_loop().time()
 _cml: dict[str, str | None] = {}
 
 
@@ -40,6 +53,7 @@ async def pubchem_names(inchikey: str) -> list[dict] | None:
         return _names[inchikey]
     url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/inchikey/{inchikey}/property/IUPACName/JSON"
     try:
+        await pubchem_slot()
         async with httpx.AsyncClient(timeout=8, follow_redirects=False) as client:
             response = await client.get(url)
     except httpx.HTTPError:
@@ -62,7 +76,9 @@ async def opsin_cml(name: str) -> str | None:
     if not OPSIN_JAR.exists():
         return None
     try:
-        proc = await asyncio.create_subprocess_exec("java", "-jar", str(OPSIN_JAR), "-ocml", stdin=asyncio.subprocess.PIPE,
+        # Small heap and serial GC: OPSIN needs little memory, and a cloud container has little to spare.
+        proc = await asyncio.create_subprocess_exec("java", "-Xmx256m", "-XX:+UseSerialGC", "-XX:TieredStopAtLevel=1",
+                                                    "-jar", str(OPSIN_JAR), "-ocml", stdin=asyncio.subprocess.PIPE,
                                                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         out, _ = await asyncio.wait_for(proc.communicate(name.encode() + b"\n"), timeout=20)
     except (OSError, asyncio.TimeoutError):

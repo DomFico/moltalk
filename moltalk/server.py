@@ -8,7 +8,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from .chemistry import analyze, draw, conformer, substructure, enumerate_stereo, NAMES
 from .limits import runner
-from .naming import name_and_locants
+from .naming import name_and_locants, pubchem_slot
 
 WIDGET_URI = "ui://widget/molecule-v15.html"
 WIDGET_MIME = "text/html;profile=mcp-app"
@@ -153,6 +153,7 @@ async def resolve_name(name: str, allow_network: bool = False) -> dict[str, Any]
     from urllib.parse import quote
     url = 'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/' + quote(name, safe='') + '/property/SMILES,ConnectivitySMILES,IUPACName,Title/JSON'
     try:
+        await pubchem_slot()
         async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
             response = await client.get(url)
     except httpx.HTTPError as exc:
@@ -183,7 +184,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--transport', choices=['stdio', 'streamable-http'], default='stdio')
     args = parser.parse_args()
-    mcp.run(transport=args.transport)
+    if args.transport == 'stdio':
+        mcp.run(transport='stdio')
+        return
+    # HTTP (Cloud Run, Docker): MCP app behind the public gateway (rate limits, /healthz, domain verification).
+    # Request URLs contain compound names and InChIKeys, so keep HTTP-client logging to warnings.
+    import logging
+    import uvicorn
+    from .public import PublicGateway
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    uvicorn.run(PublicGateway(mcp.streamable_http_app()), host=HOST, port=PORT, proxy_headers=True,
+                forwarded_allow_ips="*", log_level="warning", timeout_graceful_shutdown=10)
 
 if __name__ == '__main__':
     main()
