@@ -49,7 +49,7 @@ def test_refuses_a_name_for_a_different_structure():
 
 def test_offline_mode_gives_no_name(monkeypatch):
     monkeypatch.setattr(naming, "OFFLINE", True)
-    result = asyncio.run(naming.name_and_locants("CCO", lambda f, *a: asyncio.sleep(0, f(*a))))
+    result = asyncio.run(naming.name_and_locants("CC(C)(F)C1CC(Br)C(O)C1C#N", lambda f, *a: asyncio.sleep(0, f(*a))))
     assert result["iupac_name"] is None and "turned off" in result["name_status"] and result["locants"] == {}
 
 
@@ -63,6 +63,6 @@ def test_live_pubchem_name_and_locants(monkeypatch):
     lsd = asyncio.run(naming.name_and_locants(CASES["LSD"][0], run))
     assert lsd["iupac_name"].startswith("(6aR,9R)") and lsd["locants"]["20"] == "6a"
     unknown = asyncio.run(naming.name_and_locants("CC(C)(F)C1CC(Br)C(O)C1C#N", run))
-    assert unknown["iupac_name"] is None and "not in PubChem" in unknown["name_status"]
+    assert unknown["iupac_name"] is None and "not in MolTalk's library or PubChem" in unknown["name_status"]
     phe = asyncio.run(naming.name_and_locants("N[C@@H](Cc1ccccc1)C(=O)O", run))  # zwitterion duplicate in PubChem is ignored
     assert phe["iupac_name"] == "(2S)-2-amino-3-phenylpropanoic acid"

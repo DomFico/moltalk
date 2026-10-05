@@ -139,7 +139,7 @@ def test_pubchem_lookup_mock(monkeypatch):
         return httpx.Response(200, json={'PropertyTable': {'Properties': [
             {'CID': 702, 'SMILES': 'CCO', 'IUPACName': 'ethanol'}]}})
     monkeypatch.setattr(server.httpx, 'AsyncClient', lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
-    result = asyncio.run(resolve_name('ethyl alcohol', allow_network=True))
+    result = asyncio.run(resolve_name('zorbatrol', allow_network=True))  # not in the library, not systematic
     assert result['cid'] == 702
     assert result['analysis']['formula'] == 'C2H6O'
 
@@ -153,8 +153,8 @@ def test_pubchem_live():
     assert racemic['cid'] == 612 and racemic['stereo_summary']['status'] == 'unspecified'
     assert 'unspecified' in racemic['warning']
     l_form = asyncio.run(resolve_name('L-lactic acid', allow_network=True))
-    assert l_form['cid'] == 107689 and l_form['analysis']['stereocenters'][0]['cip'] == 'S'
+    assert l_form['source'].startswith('OPSIN') and l_form['analysis']['stereocenters'][0]['cip'] == 'S'  # read offline
     glucose = asyncio.run(resolve_name('glucose', allow_network=True))
     assert glucose['stereo_summary']['status'] == 'partially specified'
-    with pytest.raises(ValueError, match='no compound'):
+    with pytest.raises(ValueError, match='not found in MolTalk'):
         asyncio.run(resolve_name('not_a_real_chemical_xyz', allow_network=True))

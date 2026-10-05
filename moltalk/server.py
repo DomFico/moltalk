@@ -6,7 +6,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
-from .chemistry import analyze, draw, conformer, substructure, enumerate_stereo, NAMES
+from .chemistry import analyze, draw, conformer, substructure, enumerate_stereo
 from .limits import runner
 from .naming import name_and_locants, pubchem_slot
 
@@ -15,7 +15,7 @@ WIDGET_MIME = "text/html;profile=mcp-app"
 WIDGET_HTML = files("moltalk").joinpath("widget/molecule.html").read_text(encoding="utf-8")
 
 INSTRUCTIONS = """RDKit chemistry tools. Workflow rules:
-- For a compound name, call resolve_name first (allow_network=true is needed for names outside the small offline dictionary) and use its canonical_smiles. Report the source, PubChem CID/IUPAC name and stereo_summary; say explicitly when stereochemistry is missing or partial.
+- For a compound name, call resolve_name first and use its canonical_smiles. It works offline for thousands of common compounds and any systematic IUPAC name; allow_network=true additionally lets it try PubChem. Report the source, PubChem CID/IUPAC name and stereo_summary; say explicitly when stereochemistry is missing or partial.
 - If you write SMILES yourself from a stereo-specific name, check the returned CIP labels against the name's descriptors and say whether they match.
 - To show a structure, call draw_molecule; the drawing renders inline for the user, and you receive the analysis plus depicted_stereo_bonds.
 - Atom indices are zero-based input-SMILES indices, not IUPAC locants. When draw_molecule returns locants (from the verified IUPAC name), refer to atoms by locant (e.g. C6a) and use indices only internally. Never invent locants or names the tools did not return.
@@ -140,16 +140,46 @@ async def enumerate_stereoisomers(smiles: str, limit: int = 16) -> CallToolResul
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True))
 async def resolve_name(name: str, allow_network: bool = False) -> dict[str, Any]:
-    """Resolve a compound name to a structure. A small offline dictionary is checked first; otherwise allow_network=true sends the name to PubChem. RDKit is not a general IUPAC parser. Check the returned CID/IUPAC name and stereo_summary before relying on the identity."""
+    """Resolve a compound name to a structure. Tried in order: (1) MolTalk's bundled library of thousands of common compounds (trivial names, synonyms, IUPAC names; offline); (2) OPSIN, which reads systematic IUPAC names offline, including stereodescriptors; (3) PubChem, only when allow_network=true (best effort; the name is sent to PubChem). A name shared by different structures is reported as ambiguous, not guessed. Check the returned identity and stereo_summary before relying on it."""
+    from . import library
+    from .naming import opsin_smiles
     name = name.strip()
     if not name or len(name) > 256:
         raise ValueError("Name must contain 1–256 characters.")
-    if name.lower() in NAMES:
-        analysis = await runner.run(analyze, NAMES[name.lower()])
-        return {"source": "offline dictionary", "query": name, "canonical_smiles": analysis["canonical_smiles"],
-                "stereo_summary": analysis["stereo_summary"], "analysis": analysis}
+    status, found = library.find_name(name)
+    if status == "ambiguous":
+        options = "; ".join(f"{c['title']} (PubChem CID {c['cid']}, SMILES {c['smiles']})" for c in found[:6])
+        raise ValueError(f"'{name}' names more than one structure in MolTalk's library: {options}. "
+                         "No structure was chosen; ask which one is meant, or use a SMILES or a stereo-specific name.")
+    if status == "hit":
+        analysis = await runner.run(analyze, found["smiles"])
+        result = {"source": "MolTalk library (from PubChem, names from Wikidata/PubChem)", "query": name,
+                  "cid": found["cid"], "title": found["title"], "iupac_name": found.get("iupac"),
+                  "iupac_verified": found.get("iupac_verified", False),
+                  "pubchem_url": f"https://pubchem.ncbi.nlm.nih.gov/compound/{found['cid']}",
+                  "canonical_smiles": analysis["canonical_smiles"], "stereo_summary": analysis["stereo_summary"],
+                  "analysis": analysis}
+        if analysis["stereo_summary"]["unspecified"]:
+            result["warning"] = (f"This record leaves {analysis['stereo_summary']['unspecified']} stereo element(s) "
+                                 "unspecified; the name does not identify a single stereoisomer.")
+        return result
+    smiles = await opsin_smiles(name)
+    if smiles:
+        analysis = await runner.run(analyze, smiles)
+        known = library.by_inchikey(analysis["inchikey"])
+        result = {"source": "OPSIN (systematic name parsed locally)", "query": name,
+                  "canonical_smiles": analysis["canonical_smiles"], "stereo_summary": analysis["stereo_summary"],
+                  "analysis": analysis,
+                  "warning": "Structure derived from the name's systematic nomenclature; check it matches what was meant."}
+        if known:
+            result.update(cid=known["cid"], title=known["title"], iupac_name=known.get("iupac"))
+        if analysis["stereo_summary"]["unspecified"]:
+            result["warning"] += (f" The name leaves {analysis['stereo_summary']['unspecified']} stereo element(s) "
+                                  "unspecified.")
+        return result
     if not allow_network:
-        raise ValueError("Name is not in the offline dictionary. Supply SMILES or explicitly enable PubChem lookup.")
+        raise ValueError(f"'{name}' is not in MolTalk's library and is not a systematic name OPSIN can read. "
+                         "No structure was assumed. Supply a SMILES, or retry with allow_network=true to ask PubChem.")
     from urllib.parse import quote
     url = 'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/' + quote(name, safe='') + '/property/SMILES,ConnectivitySMILES,IUPACName,Title/JSON'
     try:
@@ -159,7 +189,7 @@ async def resolve_name(name: str, allow_network: bool = False) -> dict[str, Any]
     except httpx.HTTPError as exc:
         raise ValueError(f"PubChem could not be reached ({type(exc).__name__}). No structure was assumed.") from None
     if response.status_code == 404:
-        raise ValueError(f"PubChem has no compound named {name!r}. No structure was assumed; supply SMILES.")
+        raise ValueError(f"'{name}' was not found in MolTalk's library, OPSIN or PubChem. No structure was assumed; supply SMILES.")
     if response.status_code != 200:
         from .naming import _fault
         raise ValueError(f"PubChem lookup failed (HTTP {response.status_code}: {_fault(response)[:80]}).")

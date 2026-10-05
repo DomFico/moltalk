@@ -307,19 +307,49 @@ def _variants(name: str):
         yield stripped
 
 
+async def opsin_smiles(name: str) -> str | None:
+    """Systematic name -> SMILES with stereochemistry, parsed locally by OPSIN; None if OPSIN cannot read it.
+    (OPSIN reads names; it does not generate names for structures.)"""
+    if not OPSIN_JAR.exists() or not name or len(name) > 512:
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec("java", "-Xmx256m", "-XX:+UseSerialGC", "-XX:TieredStopAtLevel=1",
+                                                    "-jar", str(OPSIN_JAR), "-osmi", stdin=asyncio.subprocess.PIPE,
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(name.replace("\n", " ").encode() + b"\n"), timeout=20)
+    except (OSError, asyncio.TimeoutError):
+        return None
+    line = out.decode(errors="replace").strip().splitlines()
+    smiles = line[-1].strip() if line else ""
+    return smiles if smiles and Chem.MolFromSmiles(smiles) is not None else None
+
+
 async def name_and_locants(smiles: str, run) -> dict:
-    """{iupac_name, name_source, name_status, locants, locant_status}. run(fn, *args) executes RDKit work."""
+    """{iupac_name, name_source, name_status, locants, locant_status}. run(fn, *args) executes RDKit work.
+    Structure -> name: MolTalk's library by exact InChIKey first, then PubChem (best effort). OPSIN cannot generate
+    names, so a structure found in neither gets no name and keeps atom indices (never a guessed name)."""
+    from . import library
     mol = Chem.MolFromSmiles(smiles)
     result = {"iupac_name": None, "name_source": None, "locants": {}, "locant_status": None}
+    compound = library.by_inchikey(Chem.MolToInchiKey(mol))
+    if compound and compound.get("iupac"):
+        result.update(iupac_name=compound["iupac"], name_source=f"MolTalk library (PubChem CID {compound['cid']})",
+                      name_status="ok")
+        locants, reason = await run(library.locants_for, smiles, compound)
+        if locants:
+            result.update(locants=locants, locant_status="ok")
+        else:
+            result["locant_status"] = f"atoms are not numbered: {reason}"
+        return result
     if OFFLINE:
-        result["name_status"] = "name lookup is turned off (MOLTALK_OFFLINE=1)"
+        result["name_status"] = "not in MolTalk's library, and PubChem lookup is turned off (MOLTALK_OFFLINE=1)"
         return result
     records = await pubchem_names(Chem.MolToInchiKey(mol))
     if records is None:
-        result["name_status"] = "PubChem could not be reached"
+        result["name_status"] = "not in MolTalk's library, and PubChem could not be reached (no name is guessed)"
         return result
     if not records:
-        result["name_status"] = "this exact structure is not in PubChem, so no IUPAC name is given (not guessed)"
+        result["name_status"] = "this exact structure is not in MolTalk's library or PubChem, so no IUPAC name is given (not guessed)"
         return result
     # Keep only names whose own structure is exactly ours (drops zwitterion and salt duplicates).
     readable = []

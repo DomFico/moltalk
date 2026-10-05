@@ -19,12 +19,12 @@ moltalk  (.venv/bin/moltalk → RDKit worker processes with time/memory limits)
 | Item | Status |
 |---|---|
 | Install in an isolated venv (`.venv`, Python 3.12, RDKit 2026.03.6, mcp 1.30.0) | **Verified** |
-| Test suite: 58 tests (56 offline by default; the PubChem tests need `MOLTALK_NETWORK_TESTS=1`), including live PubChem and real-browser tests of the drawing, its 3D rotation, zoom, hydrogens and a phone touch screen | **Verified** (`pytest`) |
+| Test suite: 106 tests (104 offline by default; 2 live PubChem tests need `MOLTALK_NETWORK_TESTS=1`), including live PubChem and real-browser tests of the drawing, its 3D rotation, zoom, hydrogens and a phone touch screen | **Verified** (`pytest`) |
 | Tools and widget through official MCP clients (Python SDK over stdio/HTTP, MCP Inspector CLI) | **Verified** |
 | UI resource metadata (`ui://widget/molecule-v15.html`, `text/html;profile=mcp-app`, `_meta.ui.resourceUri` + `openai/outputTemplate`) | **Verified** |
 | Widget rendering in a sandboxed iframe through the MCP Apps bridge, plus a follow-up `tools/call` from the widget | **Verified** in Chrome with a host harness that imitates ChatGPT (`tests/test_widget_ui.py`, `tests/test_widget_3d.py`) |
 | tunnel-client → stdio server path | **Verified** with tunnel-client's local control plane (`scripts/local-tunnel-test.sh`) |
-| Live PubChem resolution | **Verified** (aspirin, lactic acid, L-lactic acid, glucose, unknown name) |
+| Name resolution: bundled library (22,000 compounds), OPSIN for systematic names, live PubChem fallback | **Verified** (`tests/test_library.py`; PubChem with `MOLTALK_NETWORK_TESTS=1`) |
 | Docker image (build, read-only fs, non-root, Host/Origin rejection) | **Verified** |
 | Creating the OpenAI tunnel and runtime key | **Needs you** (account action) |
 | Creating and installing the plugin in ChatGPT; tool calls and inline rendering *inside ChatGPT* | **Needs you.** These were not verified, because they require your logged-in ChatGPT account |
@@ -99,7 +99,7 @@ Acceptance prompts and what to expect:
 
 | Prompt | Expected |
 |---|---|
-| Draw aspirin and identify its functional groups. | `resolve_name` (offline dictionary) then `draw_molecule`. Inline drawing; groups: carboxylic acid, ester, aromatic ring |
+| Draw aspirin and identify its functional groups. | `resolve_name` (MolTalk library, offline) then `draw_molecule`. Inline drawing; groups: carboxylic acid, ester, aromatic ring |
 | Draw (1R,3S)-1-fluoro-3-methylcyclohexane and explain the wedges/dashes in this drawing. | Drawing of `F[C@H]1C[C@@H](C)CCC1`. Atom 1 = R, atom 3 = S. **Both** bonds are wedges (1→F, 3→CH₃), toward the viewer, so wedge ≠ R/S |
 | Show the stereoisomers of lactic acid when stereochemistry is unspecified. | Grid of 2: atom 1 R and atom 1 S, enantiomers of each other. If looked up via PubChem: CID 612, stereo reported as unspecified |
 | Draw C1CC(C)(C)(C)C1 | Error card: "Chemically invalid structure (Explicit valence for atom # 2 C, 5 …)". No molecule is drawn or substituted |
@@ -134,7 +134,7 @@ A public HTTPS endpoint is the documented alternative. ChatGPT accepts only **OA
 | `enumerate_stereoisomers(smiles, limit)` | **yes** (grid) | isomers with CIP labels, `achiral` (meso) flag, `enantiomer_index` |
 | `find_substructure(smiles, smarts)` | no | chirality-aware matches (≤100) |
 | `conformer_3d(smiles)` | viewer-only | one calculated 3D conformer aligned to the flat drawing, for rotating it (hidden from the model) |
-| `resolve_name(name, allow_network)` | no | offline dictionary, or PubChem CID, title, IUPAC name, `stereo_summary` and warnings |
+| `resolve_name(name, allow_network)` | no | structure from the bundled library, OPSIN or (opt-in) PubChem, with source, CID, title, IUPAC name, `stereo_summary` and warnings; ambiguous or unknown names are errors |
 
 **UI component.** `moltalk/widget/molecule.html` is registered as `ui://widget/molecule-v15.html` (`text/html;profile=mcp-app`) with an empty CSP allowlist, so it makes no network requests. It uses the MCP Apps bridge (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`, `ui/notifications/size-changed`) and falls back to `window.openai`. The SVG is sent only in the result's `_meta`, which ChatGPT passes to the widget but not to the model; the chemistry data stays in `structuredContent` for the model. The SVG is sanitized before insertion. Pass `include_svg=true` for clients without UI support.
 
@@ -152,12 +152,22 @@ A public HTTPS endpoint is the documented alternative. ChatGPT accepts only **OA
 - **Not yet done:** wedges/dashes are not redrawn during rotation.
 
 **IUPAC name and numbering.** Under the title the widget shows **SMILES:** and **IUPAC:**, and **Numbers: IUPAC | Index | Off** chooses the atom labels. IUPAC is the default; the stereocentre chips and the model's text use locants too (e.g. "C6a: R"). The pipeline (`moltalk/naming.py`) never guesses:
-1. **Name:** looked up in PubChem by the molecule's full InChIKey, an exact structure match including stereochemistry. PubChem's names are generated by OpenEye Lexichem. A structure not in PubChem gets no name ("not guessed").
+1. **Name:** looked up by the molecule's full InChIKey, an exact structure match including stereochemistry: first in MolTalk's bundled library (offline, with the numbering precomputed), then in PubChem. The names are PubChem's, generated by OpenEye Lexichem. A structure in neither gets no name ("not guessed") and keeps atom indices. OPSIN cannot generate names, so it is not a substitute here (see *Name resolution*).
 2. **Checking the name:** OPSIN 2.9.0 (open source, `vendor/`, SHA-256 matches the GitHub release, needs Java) rebuilds each candidate name. A name is used only if its structure equals ours (connectivity and charges), which drops PubChem's zwitterion and salt duplicates. If different names still fit, none is used. A redundant `cis-`/`trans-` before R/S descriptors is removed for parsing only.
 3. **Numbering:** OPSIN numbers every substituent in its own scheme. The parent is the scheme that contains all top-level locants of the name and whose bonds to other carbon schemes leave from those positions; ties are broken by which positions actually carry substituents. A remaining tie means no numbering. Only parent atoms are numbered. Symmetry-equivalent numberings are equally valid; one is used only if every R/S descriptor in the name matches our own CIP label at that locant.
 4. **Fallback:** when any step fails, the widget says why, keeps the name if known, and uses atom indices.
 
-Tested offline on 25 typical course molecules (chains, rings, aromatics, steroids, sugars, LSD). All parents were numbered correctly, except acetaminophen and ethyl acetate, whose names give no positional clue to the parent (refused), and heme, where PubChem's records disagree (refused). Privacy: each new molecule's InChIKey is sent to PubChem (cached); set `MOLTALK_OFFLINE=1` to turn this off. The Docker image has no Java, so it shows names without numbering.
+Tested offline on 25 typical course molecules (chains, rings, aromatics, steroids, sugars, LSD). All parents were numbered correctly, except acetaminophen and ethyl acetate, whose names give no positional clue to the parent (refused), and heme, where PubChem's records disagree (refused). Privacy: a molecule that is not in the library has its InChIKey sent to PubChem (cached); set `MOLTALK_OFFLINE=1` to turn this off (library names and numbering keep working). The Docker image includes Java and OPSIN.
+
+**Name resolution** (`resolve_name`, name → structure). Tried in this order; the first that answers wins:
+1. **MolTalk's bundled library** (`moltalk/data/compounds.json.gz`, about 3 MB, offline). 22,000 compounds: every compound on Wikidata that has a PubChem CID and an English Wikipedia article, plus about 410 common teaching names from `scripts/library_seed_names.txt` (sugars such as glucose, heme, cofactors, terpenes, common drugs, reagents). It covers drugs, natural products, metabolites, amino acids, solvents and reagents, and holds about 200,000 names (352 of them shared by different structures, reported as ambiguous). Each entry has its CID, PubChem's isomeric SMILES and title, synonyms, PubChem's IUPAC name, whether OPSIN rebuilds exactly that structure from the name (`iupac_verified`, about 89 %), and precomputed parent locants (about 60 %). Lookup ignores case, spacing and dash style. Names come in tiers, most trusted first: the seed list; the compound's own Wikidata label, PubChem title or IUPAC name; Wikidata aliases; PubChem synonyms. The first tier that knows the name decides, because the lower tiers contain errors (Wikidata lists "ozone" as an alias of phencyclidine, and both sources list "LSD" for lysergic acid). A name that still points to different structures within that tier (e.g. "lye": NaOH or KOH) is an error that lists the candidates; none is picked.
+2. **OPSIN** (offline): systematic IUPAC names, including R/S and E/Z, e.g. `(2R)-4-chloro-2-methylheptan-3-one`. It cannot read trivial names. The result says the structure came from parsing the name, and warns about stereo the name leaves open.
+3. **PubChem** (best effort, only when the model passes `allow_network=true`; the name is sent to PubChem). On Cloud Run, PubChem often answers "server busy", because Cloud Run's shared outgoing addresses carry other people's traffic (see Cloud NAT below).
+4. **Otherwise:** an error says the name was not found and no structure was assumed.
+
+OPSIN replaces PubChem only for *name → structure* of systematic names. It cannot *generate* a name for a structure, so structure → IUPAC name still comes from the library or PubChem. A novel structure found in neither is shown with atom indices and no name, rather than a guessed one.
+
+Rebuild the library with `.venv/bin/python scripts/build_library.py` (network, Java and OPSIN; about 10 minutes). RDKit must recompute PubChem's InChIKey from its SMILES, or the entry is dropped; compounds above 150 heavy atoms are also dropped. The current build kept 22,000 entries. Any seed name PubChem cannot find stops the build.
 
 **Lone pairs.** **Show lone pairs** draws Lewis-structure dots on the flat and rotated views, instantly, with no server call. The setting survives redraws.
 - **Count:** for each atom, take its valence electrons, subtract its formal charge, subtract one electron per bond (hidden hydrogens included; aromatic rings counted in a Kekulé form), subtract a pair for each dative bond it donates, subtract any unpaired electrons, then halve. Unpaired electrons are drawn as single dots.
@@ -198,7 +208,7 @@ Tested offline on 25 typical course molecules (chains, rings, aromatics, steroid
 - **RDKit work** runs in two worker processes with a 20 s per-call timeout (the worker is killed when it is exceeded), a 2 GB address-space cap, at most 16 queued requests, and stdout redirected so a worker can never corrupt the stdio stream. Configure with `MOLTALK_TIMEOUT_S`, `MOLTALK_WORKERS`, `MOLTALK_WORKER_MEMORY_MB` and `MOLTALK_MAX_QUEUED`.
 - **Input limits:** 4096 SMILES characters, 256 atoms, 1024 SMARTS characters, 100 substructure matches, 64 enumerated isomers (16 drawn), drawings 200–1600 px, names ≤256 characters.
 - **HTTP mode** (local testing and Docker): Host/Origin validation (DNS-rebinding protection) is **always on**, including when binding 0.0.0.0 in Docker. Only `localhost`/`127.0.0.1`/`[::1]` are accepted unless `MOLTALK_ALLOWED_HOSTS`/`MOLTALK_ALLOWED_ORIGINS` are set. Request bodies are limited to 64 KB (`MOLTALK_MAX_BODY_BYTES`). There is no authentication, so keep it on loopback.
-- **PubChem:** `resolve_name` contacts PubChem only when the model sets `allow_network=true`, and the compound name is then sent to PubChem. Nothing else leaves your computer except tunnel traffic to OpenAI.
+- **PubChem:** `resolve_name` contacts PubChem only when the name is not in the library, OPSIN cannot read it, and the model sets `allow_network=true`; the compound name is then sent to PubChem. Drawings send the InChIKey of a structure that is not in the library (turn off with `MOLTALK_OFFLINE=1`). Nothing else leaves your computer except tunnel traffic to OpenAI.
 
 ## 5. Local HTTP and Docker (testing only)
 
@@ -209,6 +219,21 @@ npx @modelcontextprotocol/inspector@latest                 # point it at the URL
 docker build -t moltalk .
 docker run --rm -p 127.0.0.1:8000:8000 --read-only --tmpfs /tmp --memory 2g --cpus 2 --pids-limit 128 moltalk
 ```
+
+### Public deployment (Google Cloud Run)
+
+The public instance is at `https://moltalk-411294000488.us-central1.run.app/mcp` (project `moltalk`, region `us-central1`). Deploy from this directory:
+
+```bash
+gcloud run deploy moltalk --source . --region us-central1 --allow-unauthenticated \
+  --min-instances 0 --max-instances 2 --cpu 1 --memory 2Gi --concurrency 8 --timeout 60 --cpu-boost \
+  --set-env-vars MOLTALK_ALLOWED_HOSTS='moltalk-411294000488.us-central1.run.app,localhost:*,127.0.0.1:*'
+```
+
+- **Cost:** it scales to zero, so an idle service costs nothing, and normal use stays inside Cloud Run's free tier. `--max-instances 2` caps the bill.
+- **Protection** (`moltalk/public.py`): limits of 60 requests per minute per ChatGPT user (`openai/subject`, or the client IP) and 600 per minute in total. `/health` is the health check (Cloud Run reserves `/healthz`). `/.well-known/openai-apps-challenge` serves `MOLTALK_OPENAI_CHALLENGE` for OpenAI's domain verification.
+- **Names without PubChem:** the library and OPSIN run inside the container. PubChem is rate-limited to 4 requests per second, and is only a fallback.
+- **Cloud NAT and a static IP (documented, not provisioned).** If real users repeatedly hit common names that are not in the library, and PubChem keeps answering "server busy" from Cloud Run's shared addresses, route outgoing traffic through a reserved IP. That needs a VPC connector or Direct VPC egress, a Cloud Router, Cloud NAT and a static address. It costs roughly US$4–5 a month while provisioned, mainly the reserved IP and the NAT gateway hours. A cheaper first step is to add the missing names to `scripts/library_seed_names.txt` and rebuild.
 
 Note on the original V1 Dockerfile: it could never start, because `python:3.12-slim` lacks `libXrender`/`libXext`/`libexpat`, which RDKit's drawing module needs. That is fixed here.
 
@@ -223,7 +248,7 @@ Note on the original V1 Dockerfile: it could never start, because `python:3.12-s
 
 Indices are zero-based **input-SMILES** atom indices, not IUPAC locants and not canonical-SMILES order. Wedge/dash belongs to a particular 2D depiction (a wedge starts at the stereocenter and points toward the viewer). It is not a synonym for R/S. In the cyclohexane example, both the R and the S centre carry wedges.
 
-RDKit does not parse IUPAC names. The offline dictionary covers water, ethanol, acetone, benzene, acetic acid, aspirin and caffeine; other names need PubChem, and PubChem records may leave stereochemistry unspecified. For example, "lactic acid" (CID 612) is unspecified and "glucose" (CID 5793) is partially specified. That status is reported explicitly in `stereo_summary` and the warning. logP is a calculated estimate. Functional groups come from a small SMARTS motif dictionary (ester oxygens are not reported as ethers) plus aromatic-ring detection; this is not an exhaustive classification. Not supported: reaction prediction, conformer energies, chair conformations, structure editing, general IUPAC parsing.
+Names are resolved as described under *Name resolution*. Library and PubChem records may leave stereochemistry unspecified. For example, "lactic acid" (CID 612) is unspecified and "glucose" (CID 5793) is partially specified, and plain "alanine" is L-alanine, as on PubChem (the returned title says so). That status is reported explicitly in `stereo_summary` and the warning. logP is a calculated estimate. Functional groups come from a small SMARTS motif dictionary (ester oxygens are not reported as ethers) plus aromatic-ring detection; this is not an exhaustive classification. Not supported: reaction prediction, conformer energies, chair conformations, structure editing, general IUPAC parsing.
 
 Sources: [OpenAI plugins: connect and test](https://developers.openai.com/plugins/deploy/connect-chatgpt), [Add UI to your MCP server](https://developers.openai.com/plugins/build/chatgpt-ui), [Plugins reference](https://developers.openai.com/plugins/reference), [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), [Developer mode](https://developers.openai.com/api/docs/guides/developer-mode), [openai/tunnel-client](https://github.com/openai/tunnel-client), [RDKit](https://www.rdkit.org/docs/), [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk).
 
@@ -239,5 +264,5 @@ It builds on:
 - [OPSIN](https://github.com/dan2097/opsin) (MIT)
 - OpenAI's [tunnel-client](https://github.com/openai/tunnel-client), under its own licence
 
-Chemical names come from [PubChem](https://pubchem.ncbi.nlm.nih.gov/) (NCBI); see their [policies](https://www.ncbi.nlm.nih.gov/home/about/policies/).
+Chemical names and structures come from [PubChem](https://pubchem.ncbi.nlm.nih.gov/) (NCBI; see their [policies](https://www.ncbi.nlm.nih.gov/home/about/policies/)) and [Wikidata](https://www.wikidata.org/) (CC0). The bundled library `moltalk/data/compounds.json.gz` is derived from both and checked with RDKit and OPSIN.
 

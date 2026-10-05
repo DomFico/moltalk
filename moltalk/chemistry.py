@@ -7,10 +7,6 @@ from .conformer import conformer_3d
 from .stereo import stereogenic_unspecified, organic_stereo
 from .coordination import coordinate, normalize_coordination, is_metal
 
-# A small explicit offline dictionary, not a general IUPAC parser.
-NAMES = {"water": "O", "ethanol": "CCO", "acetone": "CC(=O)C", "benzene": "c1ccccc1",
-         "acetic acid": "CC(=O)O", "aspirin": "CC(=O)Oc1ccccc1C(=O)O",
-         "caffeine": "Cn1c(=O)c2c(ncn2C)n(C)c1=O"}
 GROUPS = {"alcohol": "[OX2H][CX4]", "phenol": "[OX2H]c", "carboxylic acid": "[CX3](=O)[OX2H]",
           "ester": "[CX3](=O)[OX2][#6]", "amide": "[CX3](=O)[NX3]", "ketone": "[#6][CX3](=O)[#6]",
           "aldehyde": "[CX3H1](=O)[#6]", "amine": "[NX3;!$(N-C=O);!$(N-S(=O)=O)]",
