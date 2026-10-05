@@ -70,7 +70,7 @@ class PublicGateway:
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         path = scope.get("path", "")
-        if path == "/healthz":
+        if path == "/health":  # Cloud Run reserves /healthz
             return await _send_plain(send, 200, "ok")
         if path == "/.well-known/openai-apps-challenge":
             return await _send_plain(send, 200, CHALLENGE) if CHALLENGE else await _send_plain(send, 404, "not configured")

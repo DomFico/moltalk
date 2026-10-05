@@ -21,7 +21,7 @@ def _list(client, subject):
 
 def test_health_and_domain_verification(monkeypatch):
     with _client(monkeypatch, MOLTALK_OPENAI_CHALLENGE="token-abc") as client:
-        assert client.get("/healthz").text == "ok"
+        assert client.get("/health").text == "ok"
         assert client.get("/.well-known/openai-apps-challenge").text == "token-abc"
 
 

@@ -161,7 +161,8 @@ async def resolve_name(name: str, allow_network: bool = False) -> dict[str, Any]
     if response.status_code == 404:
         raise ValueError(f"PubChem has no compound named {name!r}. No structure was assumed; supply SMILES.")
     if response.status_code != 200:
-        raise ValueError(f"PubChem lookup failed (HTTP {response.status_code}).")
+        from .naming import _fault
+        raise ValueError(f"PubChem lookup failed (HTTP {response.status_code}: {_fault(response)[:80]}).")
     records = response.json()['PropertyTable']['Properties']
     if len(records) != 1:
         raise ValueError("Name resolves to multiple structures; use an explicit SMILES.")

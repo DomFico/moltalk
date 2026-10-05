@@ -61,6 +61,8 @@ async def pubchem_names(inchikey: str) -> list[dict] | None:
     if response.status_code == 404:
         records = []
     elif response.status_code != 200:
+        import logging
+        logging.getLogger("moltalk").warning("PubChem HTTP %s: %s", response.status_code, _fault(response))
         return None
     else:
         records = [{"cid": r["CID"], "name": r["IUPACName"]} for r in response.json()["PropertyTable"]["Properties"]
@@ -86,6 +88,15 @@ async def opsin_cml(name: str) -> str | None:
     text = out.decode(errors="replace")
     _cml[name] = text if "<atom" in text else None
     return _cml[name]
+
+
+def _fault(response) -> str:
+    """PubChem's own error code and message (no query text), for diagnosing refusals."""
+    try:
+        fault = response.json().get("Fault", {})
+        return f"{fault.get('Code', '')} {fault.get('Message', '')}".strip() or response.text[:120]
+    except ValueError:
+        return response.text[:120].replace("\n", " ")
 
 
 def _cml_molecule(cml: str):
