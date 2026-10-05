@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "moltalk"
+version = "0.1.0"
+description = "RDKit molecule analysis and stereochemistry tools for MCP clients"
+requires-python = ">=3.11"
+dependencies = ["rdkit>=2024.9,<2027", "mcp>=1.30,<2", "fastapi>=0.115,<1", "uvicorn>=0.30,<1", "httpx>=0.27,<1"]
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+ui-test = ["playwright>=1.40,<2"]
+[project.scripts]
+moltalk = "moltalk.server:main"
+[tool.setuptools.packages.find]
+include = ["moltalk*"]
+[tool.setuptools.package-data]
+moltalk = ["widget/*.html"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["network: needs live PubChem access (set MOLTALK_NETWORK_TESTS=1)"]

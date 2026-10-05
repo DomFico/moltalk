@@ -1,0 +1,86 @@
+{
+  "name": "(1R,3S)-1-fluoro-3-methylcyclohexane",
+  "input_smiles": "F[C@H]1C[C@@H](C)CCC1",
+  "depicted_stereo_bonds": [
+    {
+      "bond_index": 0,
+      "from_atom": 1,
+      "to_atom": 0,
+      "depiction": "BEGINWEDGE",
+      "style": "wedge",
+      "stereocenter_cip": "R",
+      "to_element": "F",
+      "explanation": "Wedge from stereocenter atom 1 (R) to F (atom 0): in this drawing that substituent points toward the viewer."
+    },
+    {
+      "bond_index": 3,
+      "from_atom": 3,
+      "to_atom": 4,
+      "depiction": "BEGINWEDGE",
+      "style": "wedge",
+      "stereocenter_cip": "S",
+      "to_element": "C",
+      "explanation": "Wedge from stereocenter atom 3 (S) to C (atom 4): in this drawing that substituent points toward the viewer."
+    }
+  ],
+  "note": "Wedge/dash depends on this 2D drawing and bond direction; it is not an intrinsic synonym for R/S. A wedge starts at the stereocenter (narrow end) and points toward the viewer; a dash points away.",
+  "analysis": {
+    "canonical_smiles": "C[C@H]1CCC[C@@H](F)C1",
+    "cxsmiles": "C[C@H]1CCC[C@@H](F)C1",
+    "inchi": "InChI=1S/C7H13F/c1-6-3-2-4-7(8)5-6/h6-7H,2-5H2,1H3/t6-,7+/m0/s1",
+    "inchikey": "BJYNDVCWPFJPDJ-NKWVEPMBSA-N",
+    "formula": "C7H13F",
+    "atom_index_base": 0,
+    "properties": {
+      "molecular_weight": 116.17900000000002,
+      "exact_mass": 116.100128636,
+      "logp_estimate": 2.534600000000001,
+      "tpsa_angstrom2": 0.0,
+      "h_bond_donors": 0,
+      "h_bond_acceptors": 0,
+      "rotatable_bonds": 0,
+      "formal_charge": 0
+    },
+    "stereocenters": [
+      {
+        "atom_index": 1,
+        "element": "C",
+        "cip": "R"
+      },
+      {
+        "atom_index": 3,
+        "element": "C",
+        "cip": "S"
+      }
+    ],
+    "double_bond_stereo": [],
+    "potential_stereo": [
+      {
+        "type": "Atom_Tetrahedral",
+        "center": 1,
+        "specified": "Specified",
+        "descriptor": "Tet_CW"
+      },
+      {
+        "type": "Atom_Tetrahedral",
+        "center": 3,
+        "specified": "Specified",
+        "descriptor": "Tet_CW"
+      }
+    ],
+    "stereo_summary": {
+      "status": "fully specified",
+      "specified": 2,
+      "unspecified": 0
+    },
+    "functional_groups": {
+      "halogen": [
+        [
+          0
+        ]
+      ]
+    },
+    "functional_group_note": "SMARTS motifs can overlap; this is not an exhaustive chemical classification.",
+    "warnings": []
+  }
+}

@@ -1,0 +1,1046 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MolTalk</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1d1d1f; --muted: #6b6b70; --line: #e3e3e6; --chip: #f2f2f4;
+    --accent: #0b6bcb; --wedge: #b4232a; --dash: #1f5fa8; --canvas: #ffffff;
+    color-scheme: light;
+  }
+  :root[data-theme="dark"] {
+    --bg: #1f1f21; --fg: #ececf1; --muted: #a1a1aa; --line: #34343a; --chip: #2a2a2e;
+    --accent: #6cb4ff; --wedge: #ff8a8f; --dash: #8ab8ff; --canvas: #ffffff;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  html, body { overflow: hidden; }  /* the page itself never scrolls; only the details box below does */
+  main { padding: 26px 16px 14px; min-height: 280px; display: flex; flex-direction: column; max-height: var(--max-h, none); }
+  main > .stage { flex: 0 0 auto; }
+  .details { flex: 0 1 auto; min-height: 0; max-height: 132px; overflow-y: auto; margin-top: 8px; padding-right: 6px;
+             scrollbar-width: thin; overscroll-behavior: contain; }
+  .details > :first-child { margin-top: 0; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin-bottom: 12px; }
+  h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  .formula { color: var(--muted); }
+  code { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+  .ids { margin: -4px 0 10px; display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; align-items: baseline; }
+  .ids .k { font-size: 11px; font-weight: 600; letter-spacing: .04em; color: var(--muted); }
+  .ids .v { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+  .ids .name { color: var(--fg); }
+  .ids .unavailable { font-style: italic; }
+  .seg { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; font-size: 12.5px; }
+  .seg > span { padding: 0 8px; color: var(--muted); }
+  .seg button { border: 0; border-left: 1px solid var(--line); border-radius: 0; background: transparent; }
+  .seg button[aria-pressed="true"] { background: var(--chip); font-weight: 600; }
+  .seg button:disabled { opacity: .45; cursor: not-allowed; }
+  .canvas { background: var(--canvas); border-radius: 10px; border: 1px solid var(--line); overflow: hidden; }
+  .canvas svg { display: block; width: 100%; height: auto; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
+  .chips li { background: var(--chip); border-radius: 999px; padding: 2px 10px; font-size: 12.5px; }
+  .chips li.warn { background: transparent; border: 1px solid var(--line); color: var(--muted); }
+  h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 14px 0 6px; }
+  ul.bonds { margin: 0; padding-left: 18px; }
+  ul.bonds li { margin: 2px 0; }
+  .wedge { color: var(--wedge); font-weight: 600; }
+  .dash { color: var(--dash); font-weight: 600; }
+  .note { color: var(--muted); font-size: 12.5px; margin: 8px 0 0; }
+  .warn-text { color: var(--fg); }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center; margin: 0 0 12px; }
+  header .toolbar { margin: 0 0 0 auto; }  /* stereoisomer header keeps its inline toolbar */
+  button { font: inherit; font-size: 12.5px; color: var(--fg); background: var(--chip); border: 1px solid var(--line);
+           border-radius: 8px; padding: 4px 10px; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: progress; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 8px; }
+  .card .canvas { border: 0; }
+  .card p { margin: 6px 2px 0; font-size: 12.5px; }
+  .error { border: 1px solid var(--wedge); border-radius: 10px; padding: 10px 12px; }
+  .empty { color: var(--muted); }
+  .liftable { position: relative; touch-action: none; cursor: grab; outline: none; user-select: none; -webkit-user-select: none; overscroll-behavior: contain; }
+  .liftable:active { cursor: grabbing; }
+  .liftable.loading { cursor: progress; }
+  .liftable:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+  .liftable > svg { display: block; width: 100%; height: auto; }
+  .liftable.fitted > svg { height: 100%; }  /* height set by fitInline(); the drawing letterboxes inside */
+  .liftable > svg.lift { position: absolute; inset: 0; height: 100%; }
+  .lifthint { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; color: var(--muted); font-size: 12px; }
+  .lifthint .tools { margin-left: auto; display: flex; gap: 6px; }
+  .lifthint .tools button { min-width: 34px; }
+  /* Viewer (fullscreen) mode: everything fits the window; nothing scrolls. Insets keep clear of the host's title bar. */
+  :root[data-mode="viewer"], :root[data-mode="viewer"] body { height: 100%; overflow: hidden; }
+  /* ChatGPT draws its own bars over the viewer: a title bar at the top on phones and the "Ask ChatGPT" box at the
+     bottom everywhere. Keep clear of both (the host's reported insets, or these measured minimums if larger), and put
+     our controls at the top, under the header, where nothing covers them. */
+  :root[data-mode="viewer"] { --clear-top: 8px; --clear-bottom: 88px; }
+  @media (max-width: 600px) { :root[data-mode="viewer"] { --clear-top: 104px; --clear-bottom: 128px; } }
+  /* Phones and tablets, detected by touch rather than width (the iPhone viewer was not narrower than 600 px). */
+  :root[data-mode="viewer"][data-touch] { --clear-top: 132px; --clear-bottom: 140px; }
+  :root[data-mode="viewer"] main { height: 100vh; height: 100dvh; max-height: none; display: flex; flex-direction: column; overflow: hidden;
+    padding: max(var(--safe-top, 0px), var(--clear-top)) calc(var(--safe-right, 0px) + 12px)
+             max(var(--safe-bottom, 0px), var(--clear-bottom)) calc(var(--safe-left, 0px) + 12px); }
+  :root[data-mode="viewer"] header { margin-bottom: 6px; }
+  :root[data-mode="viewer"] main > .toolbar { margin-bottom: 6px; gap: 6px; }
+  /* Keep the viewer's toolbar on one row on a phone, so the drawing keeps its height. */
+  :root[data-mode="viewer"] main > .toolbar button { padding: 3px 7px; font-size: 12px; }
+  :root[data-mode="viewer"] main > .toolbar .seg > span { display: none; }
+  :root[data-mode="viewer"] main > .toolbar .seg > button:first-of-type { border-left: 0; }
+  :root[data-mode="viewer"] .ids { margin: 0 0 6px; }
+  :root[data-mode="viewer"] .ids .v { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; line-height: 1.5; }
+  :root[data-mode="viewer"] .stage { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  :root[data-mode="viewer"] .lifthint { order: -1; margin: 0 0 6px; }
+  :root[data-mode="viewer"] .lifthint > span:first-child { display: none; }
+  :root[data-mode="viewer"] .liftable { flex: 1 1 auto; min-height: 0; }
+  :root[data-mode="viewer"] .liftable > svg { width: 100%; height: 100%; }
+  :root[data-mode="viewer"] .details, :root[data-mode="viewer"] .enter-viewer { display: none; }
+  .exit-viewer { display: none; }
+  :root[data-mode="viewer"] .exit-viewer { display: inline-block; }
+</style>
+</head>
+<body>
+<main id="root"><p class="empty">Waiting for a molecule…</p></main>
+<script>
+(() => {
+  "use strict";
+  const root = document.getElementById("root");
+  const pending = new Map();
+  let nextId = 1;
+  let lastInput = null;
+  let lastResult = null;
+  const conformers = new Map();
+  const views = new Map();
+  let liftSnapshot = null;
+  let showLonePairs = false;  // survives redraws (hydrogens, numbering)  // per molecule: rotation, lift, zoom and pan survive redraws (hydrogens, atom numbers)
+
+  // ---- MCP Apps bridge (JSON-RPC over postMessage), with window.openai as a fallback ----
+  function rpc(method, params) {
+    const id = nextId++;
+    window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      setTimeout(() => { if (pending.delete(id)) reject(new Error(method + " timed out")); }, 30000);
+    });
+  }
+  function notify(method, params) { window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*"); }
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent) return;
+    const msg = event.data;
+    if (!msg || msg.jsonrpc !== "2.0") return;
+    if (msg.id != null && !msg.method && pending.has(msg.id)) {
+      const { resolve, reject } = pending.get(msg.id);
+      pending.delete(msg.id);
+      msg.error ? reject(new Error(msg.error.message || "Request failed")) : resolve(msg.result);
+      return;
+    }
+    if (msg.id != null && msg.method) {
+      // A request from the host (e.g. ping, teardown): always answer so the host never waits on us.
+      const known = msg.method === "ping" || msg.method === "ui/resource-teardown";
+      window.parent.postMessage(known ? { jsonrpc: "2.0", id: msg.id, result: {} }
+        : { jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "Method not found" } }, "*");
+      return;
+    }
+    if (msg.method === "ui/notifications/tool-input") lastInput = (msg.params && msg.params.arguments) || lastInput;
+    if (msg.method === "ui/notifications/tool-result") render(msg.params);
+    if (msg.method === "ui/notifications/host-context-changed") applyHostContext(msg.params);
+  }, { passive: true });
+
+  async function callTool(name, args) {
+    if (window.openai && typeof window.openai.callTool === "function" && !bridgeReady) {
+      return window.openai.callTool(name, args);
+    }
+    return rpc("tools/call", { name, arguments: args });
+  }
+
+  let bridgeReady = false;
+  rpc("ui/initialize", {
+    appInfo: { name: "moltalk", version: "1.0.0" },
+    appCapabilities: {},
+    protocolVersion: "2026-01-26",
+  }).then((result) => {
+    bridgeReady = true;
+    applyHostContext(result && result.hostContext);
+    notify("ui/notifications/initialized", {});
+  }).catch(() => {});
+
+  function fromOpenAiGlobals() {
+    const o = window.openai;
+    if (!o) return;
+    applyTheme(o.theme);
+    if (o.displayMode) setDisplayMode(o.displayMode);
+    if (o.safeArea) setInsets(o.safeArea.insets || o.safeArea);
+    if (o.maxHeight) setMaxHeight(o.maxHeight);
+    if (o.toolInput) lastInput = o.toolInput;
+    if (o.toolOutput && !lastResult) render({ structuredContent: o.toolOutput, _meta: o.toolResponseMetadata || {} });
+  }
+  window.addEventListener("openai:set_globals", fromOpenAiGlobals, { passive: true });
+
+  function applyHostContext(ctx) {
+    if (!ctx) return;
+    applyTheme(ctx.theme);
+    if (ctx.displayMode) setDisplayMode(ctx.displayMode);
+    if (ctx.safeAreaInsets) setInsets(ctx.safeAreaInsets);
+    const dims = ctx.containerDimensions;
+    if (dims && (dims.maxHeight || dims.height)) setMaxHeight(dims.maxHeight || dims.height);
+  }
+  let maxHeight = 0;
+  function setMaxHeight(px) {
+    // The host's height limit for the inline widget: fit inside it rather than make the host add a scroll bar.
+    if (+px > 200) {
+      maxHeight = Math.floor(+px);
+      document.documentElement.style.setProperty("--max-h", `${maxHeight}px`);
+      fitInline();
+    }
+  }
+  const DETAILS_MIN = 72;  // always leave about three lines of the details box visible
+  function fitInline() {
+    // Inline under a height limit: shrink the drawing (never the controls) so header, drawing, controls and a
+    // strip of the scrollable details all fit. The viewer lays itself out with CSS instead.
+    const box = root.querySelector(".liftable");
+    if (!box) return;
+    const viewer = document.documentElement.dataset.mode === "viewer";
+    box.classList.remove("fitted");
+    box.style.height = "";
+    if (viewer || !maxHeight) { reportSize(); return; }
+    const natural = box.getBoundingClientRect().height;
+    const details = root.querySelector(".details");
+    const needed = details ? Math.min(details.scrollHeight, DETAILS_MIN) : 0;
+    const others = root.getBoundingClientRect().height - natural - (details ? details.getBoundingClientRect().height : 0);
+    const room = maxHeight - others - needed;
+    if (room < natural) {
+      box.classList.add("fitted");
+      box.style.height = `${Math.max(160, Math.floor(room))}px`;
+    }
+    reportSize();
+  }
+  window.addEventListener("resize", () => fitInline(), { passive: true });
+  function setDisplayMode(mode) {
+    const viewer = mode === "fullscreen" || mode === "pip";
+    document.documentElement.dataset.mode = viewer ? "viewer" : "inline";
+    requestAnimationFrame(fitInline);
+    // Coming back inline, the content height has not changed, so nothing would re-report it; do it explicitly.
+    requestAnimationFrame(() => requestAnimationFrame(reportSize));
+    setTimeout(reportSize, 300);
+    setTimeout(reportSize, 1000);
+  }
+  function setInsets(insets) {
+    if (!insets) return;
+    const style = document.documentElement.style;
+    for (const side of ["top", "right", "bottom", "left"]) style.setProperty(`--safe-${side}`, `${Math.max(0, +insets[side] || 0)}px`);
+    document.documentElement.dataset.insets = "1";
+  }
+  function applyTheme(theme) {
+    if (theme === "dark" || theme === "light") document.documentElement.dataset.theme = theme;
+  }
+
+  function reportSize() {
+    // Inline only: in the viewer the host sizes us and the page is the window. Never report less than 280 px,
+    // so a bad viewport during the fullscreen -> inline transition (a known iOS host issue) cannot collapse us.
+    if (document.documentElement.dataset.mode === "viewer") return;
+    const height = Math.max(280, Math.ceil(root.getBoundingClientRect().height));
+    notify("ui/notifications/size-changed", { height });
+    if (window.openai && typeof window.openai.notifyIntrinsicHeight === "function") window.openai.notifyIntrinsicHeight(height);
+  }
+  new ResizeObserver(reportSize).observe(root);
+
+  // ---- Rendering ----
+  function el(tag, attrs, ...children) {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (k === "class") node.className = v; else node.setAttribute(k, v);
+    }
+    for (const child of children) if (child != null) node.append(child);
+    return node;
+  }
+
+  // RDKit SVG is generated server-side, but strip anything active before inserting it.
+  function safeSvg(text) {
+    const doc = new DOMParser().parseFromString(String(text || ""), "image/svg+xml");
+    const svg = doc.documentElement;
+    if (!svg || svg.nodeName.toLowerCase() !== "svg" || doc.querySelector("parsererror")) return null;
+    svg.querySelectorAll("script, foreignObject, iframe, a, use").forEach((n) => n.remove());
+    for (const n of [svg, ...svg.querySelectorAll("*")]) {
+      for (const attr of [...n.attributes]) {
+        const name = attr.name.toLowerCase();
+        if (name.startsWith("on") || name === "href" || name === "xlink:href") n.removeAttribute(attr.name);
+      }
+    }
+    const w = svg.getAttribute("width"), h = svg.getAttribute("height");
+    if (!svg.getAttribute("viewBox") && w && h) svg.setAttribute("viewBox", `0 0 ${parseFloat(w)} ${parseFloat(h)}`);
+    svg.removeAttribute("width"); svg.removeAttribute("height");
+    svg.setAttribute("role", "img");
+    return document.importNode(svg, true);
+  }
+
+  function canvas(svgText, alt) {
+    const svg = safeSvg(svgText);
+    const box = el("div", { class: "canvas" });
+    if (svg) { svg.setAttribute("aria-label", alt); box.append(svg); }
+    else box.append(el("p", { class: "empty" }, "Drawing unavailable."));
+    return box;
+  }
+
+  function render(result) {
+    try {
+      renderResult(result);
+    } catch (err) {
+      // Never leave a blank panel: show what went wrong.
+      root.replaceChildren(el("div", { class: "error" }, el("strong", {}, "Viewer error. "), String(err && err.message || err)));
+      reportSize();
+    }
+  }
+
+  function renderResult(result) {
+    if (!result) return;
+    lastResult = result;
+    const data = result.structuredContent || {};
+    const meta = result._meta || {};
+    root.replaceChildren();
+    if (result.isError) {
+      const text = (result.content || []).map((c) => c.text).filter(Boolean).join(" ") || "The tool reported an error.";
+      root.append(el("div", { class: "error" }, el("strong", {}, "No structure drawn. "), text));
+    } else if (data.kind === "stereoisomers") {
+      renderIsomers(data, meta);
+    } else if (data.kind === "molecule" || data.analysis) {
+      renderMolecule(data, meta);
+    } else {
+      root.append(el("p", { class: "empty" }, "No molecule in this result."));
+    }
+    reportSize();
+  }
+
+  function renderMolecule(data, meta) {
+    const a = data.analysis || {};
+    // Numbers: IUPAC locants (when they could be determined), atom indices, or none.
+    const shown = data.numbering_shown || (data.atom_indices_shown === false ? "none" : "indices");
+    const toggle = el("span", { class: "seg", role: "group", "aria-label": "Atom numbers" }, el("span", {}, "Numbers"));
+    const hasLocants = data.locants && Object.keys(data.locants).length > 0;
+    for (const [mode, text] of [["iupac", "IUPAC"], ["indices", "Index"], ["none", "Off"]]) {
+      const b = el("button", { type: "button", "aria-pressed": String(shown === mode) }, text);
+      if (mode === "iupac" && !hasLocants) {
+        b.disabled = true;
+        b.title = data.locant_status || data.name_status || "IUPAC numbering is not available for this structure";
+      }
+      b.addEventListener("click", () => { if (shown !== mode) redraw(b, data, { numbering: mode }); });
+      toggle.append(b);
+    }
+    const lpToggle = el("button", { type: "button", "aria-pressed": String(showLonePairs) }, showLonePairs ? "Hide lone pairs" : "Show lone pairs");
+    const hasLonePairs = data.lone_pairs && Object.keys(data.lone_pairs).length > 0;
+    if (!hasLonePairs) { lpToggle.disabled = true; lpToggle.title = "No lone pairs or unpaired electrons in this structure"; }
+    const hToggle = el("button", { type: "button" }, data.hydrogens_shown ? "Hide hydrogens" : "Show hydrogens");
+    hToggle.addEventListener("click", () => redraw(hToggle, data, { hydrogens: !data.hydrogens_shown }));
+    const stage = el("div", { class: "stage" });
+    const liftNotes = el("div", {});
+    root.append(
+      el("header", {}, el("h1", {}, data.label || "Molecule"), el("span", { class: "formula" }, a.formula || "")),
+      el("div", { class: "toolbar" }, hToggle, lpToggle, toggle),
+      el("div", { class: "ids" },
+        el("span", { class: "k" }, "SMILES:"), el("code", { class: "v", title: "Canonical SMILES" }, a.canonical_smiles || ""),
+        el("span", { class: "k" }, "IUPAC:"),
+        data.iupac_name
+          ? el("span", { class: "v name", title: `From ${data.name_source} (exact structure match)` }, data.iupac_name)
+          : el("span", { class: "v unavailable" }, `not available — ${data.name_status || "no name lookup"}`)),
+      stage,
+    );
+    const chips = el("ul", { class: "chips", "aria-label": "Stereochemistry" });
+    for (const c of a.stereocenters || []) chips.append(el("li", {}, c.locant ? `C${c.locant}: ${c.cip}` : `atom ${c.atom_index} (${c.element}): ${c.cip}`));
+    for (const b of a.double_bond_stereo || []) chips.append(el("li", {}, `bond ${b.atom_indices.join("–")}: ${b.configuration}`));
+    if (a.stereo_summary && a.stereo_summary.unspecified) chips.append(el("li", { class: "warn" }, `${a.stereo_summary.unspecified} stereo element(s) unspecified`));
+    for (const g of Object.keys(a.functional_groups || {})) chips.append(el("li", { class: "warn" }, g));
+    const details = el("div", { class: "details" }, liftNotes);
+    if (chips.childElementCount) details.append(chips);
+    const bonds = data.depicted_stereo_bonds || [];
+    if (bonds.length) {
+      const list = el("ul", { class: "bonds" });
+      for (const b of bonds) {
+        list.append(el("li", {}, el("span", { class: b.style }, b.style === "wedge" ? "Wedge" : "Dash"),
+                        ` ${b.from_atom} → ${b.to_atom} (${b.to_element})` + (b.stereocenter_cip ? `, from ${b.stereocenter_cip} center` : "")));
+      }
+      details.append(el("h2", {}, "Wedges and dashes in the flat drawing"), list);
+    }
+    const depiction = data.depiction || {};
+    if (depiction.note) details.append(el("p", { class: "note" }, el("strong", {}, "Schlegel diagram. "), depiction.note));
+    if (depiction.warning) details.append(el("p", { class: "note warn-text" }, el("strong", {}, "Layout caveat. "), depiction.warning));
+    if (depiction.coordination_note) details.append(el("p", { class: "note" }, el("strong", {}, "Metal bonds. "), depiction.coordination_note));
+    root.append(details);
+    const numbersNote = shown === "iupac"
+      ? `Numbers are IUPAC locants of the parent chain or ring, from the name above (${data.name_source}). Unnumbered atoms belong to substituents.`
+      : shown === "indices"
+        ? "Numbers are zero-based input atom indices, not IUPAC locants." + (data.locant_status && data.locant_status !== "ok" ? ` IUPAC numbering: ${data.locant_status}.` : "")
+        : "";
+    details.append(el("p", { class: "note" }, `${numbersNote} Wedge/dash belongs to the flat drawing; it is not a synonym for R/S.`.trim()));
+
+    const flatSvg = safeSvg(meta.svg || data.svg);
+    if (!flatSvg) { stage.append(el("div", { class: "canvas" }, el("p", { class: "empty" }, "Drawing unavailable."))); return; }
+    flatSvg.setAttribute("aria-label", "2D drawing of " + (data.label || a.canonical_smiles || "molecule"));
+    if (!Array.isArray(meta.atom_px)) { stage.append(el("div", { class: "canvas" }, flatSvg)); return; }
+    const lift = new Lift(stage, liftNotes, flatSvg, data, meta);
+    lpToggle.addEventListener("click", () => {
+      showLonePairs = !showLonePairs;
+      lpToggle.textContent = showLonePairs ? "Hide lone pairs" : "Show lone pairs";
+      lpToggle.setAttribute("aria-pressed", String(showLonePairs));
+      lift.updateLonePairs();
+    });
+    requestAnimationFrame(fitInline);
+  }
+
+  // ---- Lift: grab the flat drawing and rotate it in 3D while it stays a chemical drawing ----
+  const SVGNS = "http://www.w3.org/2000/svg";
+  // RDKit's default atom palette, so the rotated drawing matches the flat one.
+  const ELEMENT_COLORS = { O: "#ff0000", N: "#0000ff", F: "#33cccc", Cl: "#00cc00", Br: "#7f4c19", I: "#a01eef",
+                           S: "#cccc00", P: "#ff7f00", B: "#ffb5b5", Si: "#f0c8a0", Se: "#ffa100" };  // metals stay black, as in RDKit's flat drawing
+  const INK = "#000000";
+  function svgEl(tag, attrs) {
+    const node = document.createElementNS(SVGNS, tag);
+    for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
+    return node;
+  }
+  function matMul(a, b) {
+    const r = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) for (let k = 0; k < 3; k++) r[i][j] += a[i][k] * b[k][j];
+    return r;
+  }
+  function transpose(m) { return [0, 1, 2].map((i) => [0, 1, 2].map((j) => m[j][i])); }
+  function rotX(t) { const c = Math.cos(t), s = Math.sin(t); return [[1, 0, 0], [0, c, -s], [0, s, c]]; }
+  function rotY(t) { const c = Math.cos(t), s = Math.sin(t); return [[c, 0, s], [0, 1, 0], [-s, 0, c]]; }
+  const IDENTITY = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  const smooth = (x) => x * x * (3 - 2 * x);
+  const LIFT_DISTANCE = 90;
+  // Phones and tablets. Inside the ChatGPT iOS app the frame may not report touch support, so also use the user agent
+  // and ChatGPT's own device hint.
+  const hostDevice = (window.openai && window.openai.userAgent && window.openai.userAgent.device) || {};
+  const TOUCH = (typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches) || navigator.maxTouchPoints > 0
+    || /iPhone|iPad|iPod|Android|Mobile/i.test(navigator.userAgent || "") || hostDevice.type === "mobile" || hostDevice.type === "tablet";
+  if (TOUCH) document.documentElement.dataset.touch = "1";
+  function canRequestFullscreen() {
+    return !!(window.openai && typeof window.openai.requestDisplayMode === "function") || bridgeReady;
+  }
+  // Change presentation (never requestClose, which closes the widget). "Exit viewer" asks for inline explicitly,
+  // which avoids relying on the host's own close control during the fullscreen -> inline transition.
+  async function requestDisplay(mode) {
+    try {
+      if (window.openai && typeof window.openai.requestDisplayMode === "function") {
+        await window.openai.requestDisplayMode({ mode });
+      } else {
+        await rpc("ui/request-display-mode", { mode });
+      }
+    } catch (err) { /* the host may not support it; nothing else to do */ }
+  }
+
+  // ---- Lone pairs: dot pairs in the largest open gaps around an atom (away from bonds, H labels and charges) ----
+  // 2D placement for the flat drawing: share the pairs out across the open gaps between bonds (each gap gets pairs in
+  // proportion to its size), then space them evenly inside each gap. One bond and two pairs gives the textbook
+  // +-120 degrees; one bond and three pairs gives 90, 180, 270 degrees from the bond.
+  function freeAngles(count, occupied) {
+    if (!count) return [];
+    const full = 2 * Math.PI;
+    if (!occupied.length) return Array.from({ length: count }, (_, k) => -Math.PI / 2 + k * full / count);
+    const taken = occupied.map((a) => ((a % full) + full) % full).sort((p, q) => p - q);
+    const gaps = taken.map((a, i) => ({ start: a, size: (i + 1 < taken.length ? taken[i + 1] : taken[0] + full) - a, n: 0 }));
+    for (let k = 0; k < count; k++) {
+      const gap = gaps.reduce((best, g) => (g.size / (g.n + 1) > best.size / (best.n + 1) ? g : best));
+      gap.n += 1;
+    }
+    const angles = [];
+    for (const g of gaps) for (let k = 1; k <= g.n; k++) angles.push(g.start + g.size * k / (g.n + 1));
+    return angles;
+  }
+  // Distance from (x, y) to the edge of a label box along an angle.
+  function toEdge(x, y, box, angle) {
+    const c = Math.cos(angle), s = Math.sin(angle);
+    const tx = Math.abs(c) < 1e-6 ? Infinity : ((c > 0 ? box.x1 : box.x0) - x) / c;
+    const ty = Math.abs(s) < 1e-6 ? Infinity : ((s > 0 ? box.y1 : box.y0) - y) / s;
+    return Math.max(0, Math.min(tx, ty));
+  }
+  // box: the atom label's extent {x0, y0, x1, y1} and its glyph height h; dots sit just outside it.
+  function drawElectrons(group, x, y, info, neighbourAngles, hLeft, box, colour, fixedAngles) {
+    const occupied = neighbourAngles.slice();
+    if (info.h) occupied.push(hLeft ? Math.PI : 0);  // the "H"/"H2" written beside the symbol
+    // The charge sign needs no blocked direction: it is inside the label box, and dots sit outside the box.
+    const total = info.pairs + (info.radicals ? 1 : 0);
+    const angles = fixedAngles && fixedAngles.length === total ? fixedAngles : freeAngles(total, occupied);
+    const h = box.h, gap = 0.32 * h, dot = Math.max(1.6, 0.095 * h), pad = 0.14 * h;
+    angles.forEach((angle, k) => {
+      const r = toEdge(x, y, box, angle) + pad + dot;
+      const cx = x + r * Math.cos(angle), cy = y + r * Math.sin(angle);
+      const px = -Math.sin(angle), py = Math.cos(angle);
+      const dots = k < info.pairs ? [[cx + px * gap / 2, cy + py * gap / 2], [cx - px * gap / 2, cy - py * gap / 2]] : [[cx, cy]];
+      for (const [dx, dy] of dots) group.append(svgEl("circle", { cx: dx.toFixed(1), cy: dy.toFixed(1), r: dot.toFixed(2), fill: colour, class: "lp-dot" }));
+    });
+  }
+
+  class Lift {
+    constructor(stage, notes, flatSvg, data, meta) {
+      this.data = data; this.meta = meta; this.notes = notes;
+      this.numbering = data.numbering_shown || (data.atom_indices_shown === false ? "none" : "indices");
+      this.locants = data.locants || {};
+      this.W = meta.width || 640; this.H = meta.height || 420;
+      this.flatSvg = flatSvg;
+      this.svg = svgEl("svg", { class: "lift", viewBox: `0 0 ${this.W} ${this.H}`, "aria-hidden": "true" });
+      this.svg.style.display = "none";
+      this.box = el("div", { class: "canvas liftable", tabindex: "0", role: "img",
+        "aria-label": "Molecule drawing. Drag, or use the arrow keys, to rotate it in 3D; Escape returns it to flat." });
+      this.box.append(flatSvg, this.svg);
+      this.reset = el("button", { type: "button", disabled: "" }, "Reset");
+      const zoomOut = el("button", { type: "button", "aria-label": "Zoom out" }, "−");
+      const zoomIn = el("button", { type: "button", "aria-label": "Zoom in" }, "+");
+      const tools = el("span", { class: "tools" }, zoomOut, zoomIn, this.reset);
+      if (canRequestFullscreen()) {
+        const full = el("button", { type: "button", class: "enter-viewer" }, "Enter viewer");
+        full.addEventListener("click", () => requestDisplay("fullscreen"));
+        const exit = el("button", { type: "button", class: "exit-viewer" }, "Exit viewer");
+        exit.addEventListener("click", () => requestDisplay("inline"));
+        tools.prepend(full, exit);
+      }
+      this.status = el("span", {}, TOUCH ? "Drag to rotate · pinch to zoom" : "Drag to rotate · Ctrl+scroll or +/− to zoom · Shift+drag to pan");
+      stage.append(this.box, el("div", { class: "lifthint" }, this.status, tools));
+      this.R = IDENTITY; this.s = 0; this.travel = 0; this.lifted = false; this.model = null;
+      this.zoom = 1; this.panX = 0; this.panY = 0;
+      this.reset.addEventListener("click", () => this.resetAll());
+      zoomOut.addEventListener("click", () => this.setZoom((this.targetZoom || this.zoom) / 1.2));
+      zoomIn.addEventListener("click", () => this.setZoom((this.targetZoom || this.zoom) * 1.2));
+      this.bindInput();
+      this.updateLonePairs();
+      const saved = views.get(data.input_smiles);
+      if (saved) {
+        this.restoring = saved.lifted;  // don't overwrite the remembered view until it has been restored
+        this.zoom = saved.zoom; this.panX = saved.panX; this.panY = saved.panY;
+        this.applyView();
+        if (saved.lifted) {
+          if (liftSnapshot) {
+            this.snapshot = liftSnapshot;
+            liftSnapshot = null;
+            this.flatSvg.style.visibility = "hidden";
+            this.box.append(this.snapshot);
+          }
+          this.ensureModel().then((m) => {
+            this.restoring = false;
+            if (this.snapshot) { this.snapshot.remove(); this.snapshot = null; this.flatSvg.style.visibility = "visible"; }
+            if (m) this.restoreLift(saved.R, saved.scale);
+          });
+        }
+      }
+      setTimeout(() => this.ensureModel(), 250);  // fetch quietly so the first drag responds at once
+    }
+
+    async ensureModel() {
+      if (this.model || this.failed) return this.model;
+      if (!this.loading) {
+        const smiles = this.data.input_smiles, hydrogens = !!this.data.hydrogens_shown;
+        const key = smiles + "|" + hydrogens;
+        this.box.classList.add("loading");
+        this.loading = (async () => {
+          // One request per molecule, shared by every widget render that needs it.
+          if (!conformers.has(key)) {
+            conformers.set(key, callTool("conformer_3d", { smiles, hydrogens }).then((result) => {
+              if (!result || result.isError || !result.structuredContent) {
+                const text = result && (result.content || []).map((c) => c.text).filter(Boolean).join(" ");
+                throw new Error(text || "No 3D coordinates were returned.");
+              }
+              return result.structuredContent;
+            }));
+          }
+          let model;
+          try { model = await conformers.get(key); } catch (err) { conformers.delete(key); throw err; }
+          if (model.atoms.length !== this.meta.atom_px.length) throw new Error("3D data does not match this drawing.");
+          this.prepare(model);
+          if (this.pending) {
+            const { dx, dy, d } = this.pending;
+            this.pending = null;
+            this.rotate(dx * 0.007, dy * 0.007, d);
+          }
+          return model;
+        })().catch((err) => {
+          this.failed = true;
+          this.status.textContent = "3D rotation unavailable: " + String(err.message || err).replace(/^Error executing tool \w+: /, "");
+        }).finally(() => this.box.classList.remove("loading"));
+      }
+      return this.loading;
+    }
+
+    prepare(model) {
+      // Map flat-layout units to the drawing's pixels (uniform scale, y flipped) by least squares.
+      const px = this.meta.atom_px, atoms = model.atoms;
+      const n = atoms.length;
+      let mx = 0, my = 0, mpx = 0, mpy = 0;
+      atoms.forEach((a, i) => { mx += a.xy[0]; my += a.xy[1]; mpx += px[i][0]; mpy += px[i][1]; });
+      mx /= n; my /= n; mpx /= n; mpy /= n;
+      let num = 0, den = 0;
+      atoms.forEach((a, i) => {
+        const x = a.xy[0] - mx, y = a.xy[1] - my;
+        num += x * (px[i][0] - mpx) - y * (px[i][1] - mpy);
+        den += x * x + y * y;
+      });
+      const k = den > 0 ? num / den : 1;
+      this.k = k; this.tx = mpx - k * mx; this.ty = mpy + k * my;
+      const heavy = atoms.slice(0, model.heavy_atom_count || n);
+      const c = [0, 0, 0];
+      heavy.forEach((a) => { for (let j = 0; j < 3; j++) c[j] += a.xyz[j] / heavy.length; });
+      this.centre = c;
+      // Once lifted, the structure is centred and, if its 3D extent needs it, shrunk to fit the canvas.
+      let r3 = 0;
+      heavy.forEach((a) => { r3 = Math.max(r3, Math.hypot(a.xyz[0] - c[0], a.xyz[1] - c[1], a.xyz[2] - c[2])); });
+      // Shrinking for the worst-case orientation makes the drawing jump away; go only partway (sqrt) and
+      // accept slight clipping at extreme angles.
+      const room = 0.5 * Math.min(this.W, this.H) - 8;
+      this.fit = Math.sqrt(Math.min(1, room / Math.max(1e-6, k * r3)));
+      this.flat = atoms.map((_, i) => px[i]);
+      const lengths = model.bonds.map((b) => Math.hypot(px[b.a][0] - px[b.b][0], px[b.a][1] - px[b.b][1])).sort((p, q) => p - q);
+      // No bonds (an ion such as hydroxide or chloride): size the label from RDKit's own label instead.
+      this.bondPx = lengths.length ? lengths[Math.floor(lengths.length / 2)]
+        : this.flatLabelBox(0, px[0][0], px[0][1]).h / 0.42;
+      // Lone ions: RDKit's measured letter height, converted to a font size (capitals are ~72% of the font size).
+      this.fs = lengths.length ? Math.max(9, Math.min(30, 0.42 * this.bondPx)) : 0.42 * this.bondPx / 0.72;
+      this.model = model;
+    }
+
+    bindInput() {
+      const pointers = new Map();
+      let moved = 0, pinch = null;
+      this.box.addEventListener("pointerenter", () => this.ensureModel(), { passive: true });
+      this.box.addEventListener("focus", () => this.ensureModel());
+      // Stop the page or the app from treating gestures on the drawing as scrolling or swiping.
+      for (const type of ["touchstart", "touchmove"]) this.box.addEventListener(type, (e) => e.preventDefault(), { passive: false });
+      this.box.addEventListener("pointerdown", (e) => {
+        if (e.pointerType === "mouse" && e.button !== 0) return;
+        if (e.pointerType === "touch") this.status.textContent = "Drag to rotate · pinch to zoom";
+        this.ensureModel();
+        this.box.setPointerCapture(e.pointerId);
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (pointers.size === 1) moved = 0;
+        pinch = null;
+      });
+      this.box.addEventListener("pointermove", (e) => {
+        const last = pointers.get(e.pointerId);
+        if (!last) return;
+        const dx = e.clientX - last.x, dy = e.clientY - last.y;
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (pointers.size >= 2) {
+          // Two fingers: pinch to zoom, move together to pan.
+          const [p, q] = [...pointers.values()];
+          const mid = { x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 }, dist = Math.hypot(p.x - q.x, p.y - q.y);
+          if (pinch) {
+            this.panBy(mid.x - pinch.mid.x, mid.y - pinch.mid.y);
+            this.setZoom(this.zoom * dist / Math.max(1, pinch.dist), true);
+          }
+          pinch = { mid, dist };
+          return;
+        }
+        if (e.shiftKey) { this.panBy(dx, dy); return; }
+        moved += Math.hypot(dx, dy);
+        if (moved < 3) return;
+        if (!this.model) {
+          // Still loading: remember the movement and apply it when the 3D data arrives.
+          this.pending = this.pending || { dx: 0, dy: 0, d: 0 };
+          this.pending.dx += dx; this.pending.dy += dy; this.pending.d += Math.hypot(dx, dy);
+          return;
+        }
+        this.rotate(dx * 0.007, dy * 0.007, Math.hypot(dx, dy));
+      });
+      const end = (e) => { pointers.delete(e.pointerId); pinch = null; };
+      this.box.addEventListener("pointerup", end);
+      this.box.addEventListener("pointercancel", end);
+      // Ctrl/Cmd+scroll (and trackpad pinch, which browsers report the same way) zooms; plain scroll still scrolls the chat.
+      this.box.addEventListener("wheel", (e) => {
+        if (!e.ctrlKey && !e.metaKey) return;
+        e.preventDefault();
+        const lines = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;  // normalise mouse-wheel units to pixels
+        this.setZoom((this.targetZoom || this.zoom) * Math.exp(-e.deltaY * lines * 0.0015));
+      }, { passive: false });
+      this.box.addEventListener("keydown", async (e) => {
+        const step = Math.PI / 18;
+        const turns = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
+        if (turns[e.key]) {
+          e.preventDefault();
+          if (!(await this.ensureModel())) return;
+          this.rotate(turns[e.key][0], turns[e.key][1], 30);
+        } else if (e.key === "+" || e.key === "=") {
+          e.preventDefault(); this.setZoom((this.targetZoom || this.zoom) * 1.2);
+        } else if (e.key === "-") {
+          e.preventDefault(); this.setZoom((this.targetZoom || this.zoom) / 1.2);
+        } else if (e.key === "Escape" || e.key === "0") {
+          e.preventDefault();
+          this.resetAll();
+        }
+      });
+    }
+
+    // Zoom and pan act on both the flat drawing and the rotated one, through the SVG viewBox.
+    // Buttons, keys and the wheel glide to a target zoom; pinching follows the fingers directly.
+    setZoom(z, immediate) {
+      this.targetZoom = Math.min(6, Math.max(0.5, z));
+      if (immediate) { this.zoom = this.targetZoom; this.applyView(); return; }
+      if (this.zooming) return;
+      this.zooming = true;
+      const glide = () => {
+        const diff = Math.log(this.targetZoom / this.zoom);
+        this.zoom = Math.abs(diff) < 0.004 ? this.targetZoom : this.zoom * Math.exp(diff * 0.22);
+        this.applyView();
+        if (this.zoom !== this.targetZoom) requestAnimationFrame(glide); else this.zooming = false;
+      };
+      requestAnimationFrame(glide);
+    }
+    panBy(dx, dy) {
+      const rect = this.box.getBoundingClientRect();
+      const unit = this.W / Math.max(1, rect.width) / this.zoom;  // screen px -> drawing units
+      this.panX += dx * unit; this.panY += dy * unit;
+      this.applyView();
+    }
+    applyView() {
+      const w = this.W / this.zoom, h = this.H / this.zoom;
+      const box = `${(this.W - w) / 2 - this.panX} ${(this.H - h) / 2 - this.panY} ${w} ${h}`;
+      this.flatSvg.setAttribute("viewBox", box);
+      this.svg.setAttribute("viewBox", box);
+      this.reset.disabled = !this.lifted && this.zoom === 1 && !this.panX && !this.panY;
+      this.remember();
+    }
+    // Lone pairs on the flat drawing: an overlay in the RDKit SVG's own coordinates (so zoom and pan apply).
+    updateLonePairs() {
+      const old = this.flatSvg.querySelector("g.lone-pairs");
+      if (old) old.remove();
+      if (showLonePairs && this.data.lone_pairs) {
+        const px = this.meta.atom_px, bonds = this.meta.bonds || [];
+        const g = svgEl("g", { class: "lone-pairs" });
+        for (const [key, info] of Object.entries(this.data.lone_pairs)) {
+          const i = +key, [x, y] = px[i];
+          const angles = [], dxs = [];
+          for (const [a, b] of bonds) {
+            if (a !== i && b !== i) continue;
+            const j = a === i ? b : a;
+            angles.push(Math.atan2(px[j][1] - y, px[j][0] - x));
+            dxs.push(px[j][0] - x);
+          }
+          // Which side RDKit wrote the H on: the label box reaches further that way (H3O+ vs OH-).
+          const box = this.flatLabelBox(i, x, y);
+          const hLeft = x - box.x0 > box.x1 - x;
+          drawElectrons(g, x, y, info, angles, hLeft, box, ELEMENT_COLORS[this.elementOf(i)] || INK);
+        }
+        this.flatSvg.append(g);
+      }
+      if (this.lifted) this.paint();  // repaint now, so the toggle feels immediate
+    }
+    flatLabelBox(i, x, y) {
+      // RDKit draws each atom label as paths with class "atom-<i>"; their union is the label's exact box.
+      let box = null;
+      for (const path of this.flatSvg.querySelectorAll(`path[class="atom-${i}"]`)) {
+        const b = path.getBBox();
+        if (!b.width && !b.height) continue;
+        box = box ? { x0: Math.min(box.x0, b.x), y0: Math.min(box.y0, b.y), x1: Math.max(box.x1, b.x + b.width), y1: Math.max(box.y1, b.y + b.height) }
+                  : { x0: b.x, y0: b.y, x1: b.x + b.width, y1: b.y + b.height };
+      }
+      if (!box) return { x0: x - 6, y0: y - 6, x1: x + 6, y1: y + 6, h: 12 };
+      // Glyph height: the label box near the atom's own row (a subscript or charge can make the box taller).
+      box.h = Math.min(box.y1 - box.y0, 2 * Math.min(y - box.y0, box.y1 - y) + 1);
+      return box;
+    }
+    elementOf(i) { return (this.data.lone_pairs[String(i)] || {}).element || (this.model && this.model.atoms[i].element); }
+
+    // The explicit-H model is aligned to its own drawing; to_heavy_frame converts so a toggle keeps the same view.
+    modelFrame() { return (this.model && this.model.to_heavy_frame) || IDENTITY; }
+    remember() {
+      if (this.restoring) return;
+      views.set(this.data.input_smiles, { R: matMul(this.R, transpose(this.modelFrame())), lifted: this.lifted, zoom: this.zoom, panX: this.panX, panY: this.panY,
+                                          scale: this.model ? this.k * this.fit : null });
+    }
+    prefetchOther() {
+      // Fetch the other hydrogen setting's 3D data in the background, so the toggle is instant.
+      const smiles = this.data.input_smiles, hydrogens = !this.data.hydrogens_shown, key = smiles + "|" + hydrogens;
+      if (conformers.has(key)) return;
+      const request = callTool("conformer_3d", { smiles, hydrogens }).then((r) => {
+        if (!r || r.isError || !r.structuredContent) throw new Error("prefetch failed");
+        return r.structuredContent;
+      });
+      request.catch(() => conformers.delete(key));
+      conformers.set(key, request);
+    }
+    restoreLift(R, scale) {
+      // Same rotation and same on-screen size as before the redraw (an explicit-H drawing has a different flat scale).
+      if (scale) this.fit = scale / this.k;
+      this.lifted = true; this.s = 1; this.travel = LIFT_DISTANCE; this.R = matMul(R, this.modelFrame());
+      this.flatSvg.style.visibility = "hidden";
+      this.svg.style.display = "block";
+      this.reset.disabled = false;
+      this.showNotes();
+      this.paint();
+      this.remember();
+    }
+    resetAll() {
+      this.zoom = 1; this.targetZoom = 1; this.panX = 0; this.panY = 0;
+      this.applyView();
+      this.flatten();
+    }
+
+    rotate(ax, ay, distance) {
+      if (!this.lifted) {
+        this.lifted = true;
+        this.flatSvg.style.visibility = "hidden";
+        this.svg.style.display = "block";
+        this.reset.disabled = false;
+        this.showNotes();
+        this.prefetchOther();
+      }
+      this.travel += distance;
+      this.s = Math.max(this.s, smooth(Math.min(1, this.travel / LIFT_DISTANCE)));
+      this.R = matMul(matMul(rotY(ax), rotX(ay)), this.R);
+      this.remember();
+      this.draw();
+    }
+
+    flatten() {
+      if (!this.lifted) return;
+      const from = this.s, start = performance.now();
+      const step = (now) => {
+        const t = Math.min(1, (now - start) / 280);
+        this.s = from * (1 - smooth(t));
+        this.paint();
+        if (t < 1) { requestAnimationFrame(step); return; }
+        this.R = IDENTITY; this.travel = 0; this.lifted = false;
+        this.svg.style.display = "none";
+        this.flatSvg.style.visibility = "visible";
+        this.applyView();
+        this.notes.replaceChildren();
+        reportSize();
+      };
+      requestAnimationFrame(step);
+    }
+
+    showNotes() {
+      const m = this.model;
+      this.notes.replaceChildren(el("p", { class: "note" }, el("strong", {}, "Rotated view. "), m.note,
+        (this.data.hydrogens_shown ? "" : " Hidden hydrogens stay hidden;") + " the wedges listed below describe the flat drawing."));
+      if (m.warning) this.notes.append(el("p", { class: "note warn-text" }, el("strong", {}, "Model caveat. "), m.warning));
+      reportSize();
+    }
+
+    draw() {
+      if (this.frame) return;
+      this.frame = requestAnimationFrame(() => { this.frame = null; this.paint(); });
+    }
+
+    // Screen position and depth of every atom for the current rotation and lift amount.
+    project() {
+      const { atoms } = this.model, R = this.R, c = this.centre, s = this.s, k = this.k;
+      return atoms.map((a, i) => {
+        const x = a.xyz[0] - c[0], y = a.xyz[1] - c[1], z = a.xyz[2] - c[2];
+        const rx = R[0][0] * x + R[0][1] * y + R[0][2] * z;
+        const ry = R[1][0] * x + R[1][1] * y + R[1][2] * z;
+        const rz = R[2][0] * x + R[2][1] * y + R[2][2] * z;
+        const sx = this.W / 2 + k * this.fit * rx, sy = this.H / 2 - k * this.fit * ry;
+        const [fx, fy] = this.flat[i];
+        return { x: fx + (sx - fx) * s, y: fy + (sy - fy) * s, z: rz * s };
+      });
+    }
+
+    label(atom, pts, i) {
+      // ChemDraw/RDKit convention: carbons are implicit unless charged or isolated.
+      const neighbours = this.neighbours[i];
+      if (atom.element === "C" && !atom.charge && neighbours.length) return null;
+      let mean = 0;
+      for (const j of neighbours) mean += pts[j].x - pts[i].x;
+      return { symbol: atom.element, h: atom.h, hLeft: neighbours.length > 0 && mean > 0, charge: atom.charge };
+    }
+
+    paint() {
+      const m = this.model;
+      if (!m) return;
+      if (!this.neighbours) {
+        this.neighbours = m.atoms.map(() => []);
+        for (const b of m.bonds) { this.neighbours[b.a].push(b.b); this.neighbours[b.b].push(b.a); }
+      }
+      const pts = this.project();
+      const R = this.R;
+      const s = this.s, zoom = 1 + (this.fit - 1) * s;  // labels and line spacing follow the fit-to-canvas scale
+      const fs = this.fs * zoom, bondPx = this.bondPx * zoom;
+      const labels = m.atoms.map((a, i) => this.label(a, pts, i));
+      const ringCentre = m.rings.map((ring) => {
+        let x = 0, y = 0;
+        for (const i of ring) { x += pts[i].x; y += pts[i].y; }
+        return { x: x / ring.length, y: y / ring.length };
+      });
+      const items = m.bonds.map((b) => ({ depth: (pts[b.a].z + pts[b.b].z) / 2, bond: b }));
+      m.atoms.forEach((_, i) => items.push({ depth: pts[i].z + 1e-4, atom: i }));
+      items.sort((p, q) => p.depth - q.depth);
+
+      // Distance from an atom's centre to the edge of its label, along direction (ux, uy).
+      const trim = (i, ux, uy) => {
+        const lab = labels[i];
+        if (!lab) return 0;
+        const hw = 0.33 * fs * lab.symbol.length + 2, hh = 0.55 * fs;
+        return Math.min(Math.abs(ux) > 1e-6 ? hw / Math.abs(ux) : Infinity, Math.abs(uy) > 1e-6 ? hh / Math.abs(uy) : Infinity);
+      };
+      const colour = (i) => ELEMENT_COLORS[m.atoms[i].element] || INK;
+      const g = svgEl("g", { "stroke-linecap": "round" });
+      const line = (x1, y1, x2, y2, stroke, width, opacity) => g.append(svgEl("line", {
+        x1: x1.toFixed(1), y1: y1.toFixed(1), x2: x2.toFixed(1), y2: y2.toFixed(1),
+        stroke, "stroke-width": width.toFixed(2), "stroke-opacity": opacity.toFixed(2) }));
+      // A bond line coloured half-and-half by its end atoms, as RDKit draws it.
+      const halves = (x1, y1, x2, y2, a, b, width, opacity) => {
+        const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+        line(x1, y1, mx, my, colour(a), width, opacity);
+        line(mx, my, x2, y2, colour(b), width, opacity);
+      };
+
+      for (const item of items) {
+        const opacity = 1;
+        if (item.bond) {
+          const { a, b, order, ring } = item.bond;
+          const p = pts[a], q = pts[b];
+          const len = Math.hypot(q.x - p.x, q.y - p.y);
+          if (len < 1) continue;
+          const ux = (q.x - p.x) / len, uy = (q.y - p.y) / len, nx = -uy, ny = ux;
+          const ta = trim(a, ux, uy), tb = trim(b, ux, uy);
+          if (len <= ta + tb + 2) continue;
+          const x1 = p.x + ux * ta, y1 = p.y + uy * ta, x2 = q.x - ux * tb, y2 = q.y - uy * tb;
+          const gap = 0.16 * bondPx;
+          let lines;  // [offset along the normal, shorten-at-both-ends fraction]
+          if (order === 2 && ring != null) {
+            const cx = ringCentre[ring].x - (p.x + q.x) / 2, cy = ringCentre[ring].y - (p.y + q.y) / 2;
+            lines = [[0, 0], [Math.sign(cx * nx + cy * ny || 1) * gap, 0.16]];
+          } else if (order === 2) {
+            lines = [[-gap / 2, 0], [gap / 2, 0]];
+          } else if (order >= 3) {
+            lines = [[-gap, 0], [0, 0], [gap, 0]];
+          } else {
+            lines = [[0, 0]];
+          }
+          // Halo: a background-coloured stroke under the middle of the bond cuts a gap in bonds behind it.
+          if (s > 0.02) {
+            const keep = Math.min(0.3 * len, 0.22 * bondPx) + 1;
+            const spread = Math.max(...lines.map(([o]) => Math.abs(o)));
+            if (len - ta - tb > 2 * keep) line(p.x + ux * (ta + keep), p.y + uy * (ta + keep), q.x - ux * (tb + keep), q.y - uy * (tb + keep),
+                 "#ffffff", 2 * spread + 7, 1);
+          }
+          if (item.bond.dative) {
+            // Coordinate bond, donor -> metal: an arrowhead just short of the metal label.
+            const hx = x2, hy = y2, size = Math.max(5, 0.18 * bondPx);
+            g.append(svgEl("polygon", { points: [[hx, hy], [hx - ux * size + nx * size * 0.45, hy - uy * size + ny * size * 0.45],
+              [hx - ux * size - nx * size * 0.45, hy - uy * size - ny * size * 0.45]].map((pt) => pt.map((v) => v.toFixed(1)).join(",")).join(" "),
+              fill: colour(b) }));
+          }
+          for (const [off, shorten] of lines) {
+            const cut = shorten * len;
+            halves(x1 + nx * off + ux * cut, y1 + ny * off + uy * cut, x2 + nx * off - ux * cut, y2 + ny * off - uy * cut,
+                   a, b, 2, opacity);
+          }
+        } else {
+          const i = item.atom, atom = m.atoms[i], p = pts[i], lab = labels[i];
+          const op = "1";
+          if (lab) {
+            const fill = ELEMENT_COLORS[lab.symbol] || INK;
+            const w = 0.62 * fs * lab.symbol.length;
+            g.append(svgEl("rect", { x: (p.x - w / 2 - 1).toFixed(1), y: (p.y - 0.6 * fs).toFixed(1),
+              width: (w + 2).toFixed(1), height: (1.2 * fs).toFixed(1), fill: "#ffffff" }));
+            const text = (x, anchor, content, size) => {
+              const t = svgEl("text", { x: x.toFixed(1), y: p.y.toFixed(1), "text-anchor": anchor, "dominant-baseline": "central",
+                "font-size": size.toFixed(1), "font-family": "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+                fill, "fill-opacity": op });
+              for (const [str, sub] of content) {
+                const span = svgEl("tspan", sub ? { "font-size": (0.7 * size).toFixed(1), dy: sub === "sub" ? (0.25 * size).toFixed(1) : (-0.35 * size).toFixed(1) } : {});
+                span.textContent = str;
+                t.append(span);
+              }
+              g.append(t);
+            };
+            text(p.x, "middle", [[lab.symbol]], fs);
+            if (lab.h) {
+              const hText = [["H"]].concat(lab.h > 1 ? [[String(lab.h), "sub"]] : []);
+              const hw = (0.62 * fs * (1 + (lab.h > 1 ? 0.6 : 0))) + 2;
+              g.append(svgEl("rect", { x: (lab.hLeft ? p.x - w / 2 - hw : p.x + w / 2).toFixed(1), y: (p.y - 0.6 * fs).toFixed(1),
+                width: hw.toFixed(1), height: (1.2 * fs).toFixed(1), fill: "#ffffff" }));
+              text(lab.hLeft ? p.x - w / 2 : p.x + w / 2, lab.hLeft ? "end" : "start", hText, fs);
+            }
+            if (lab.charge) {
+              const c = (Math.abs(lab.charge) > 1 ? Math.abs(lab.charge) : "") + (lab.charge > 0 ? "+" : "−");
+              text(p.x + w / 2 + (lab.h && !lab.hLeft ? 0.62 * fs * 1.4 : 0), "start", [[c, "sup"]], fs);
+            }
+          }
+          const electronInfo = showLonePairs && this.data.lone_pairs && this.data.lone_pairs[String(i)];
+          if (electronInfo) {
+            const angles = this.neighbours[i].map((j) => Math.atan2(pts[j].y - p.y, pts[j].x - p.x));
+            const w = lab ? 0.62 * fs * lab.symbol.length : 0.6 * fs;
+            const hw = lab && lab.h ? 0.62 * fs * (lab.h > 1 ? 1.6 : 1) : 0;
+            const charge = lab && lab.charge ? 0.45 * fs : 0;
+            const box = { x0: p.x - w / 2 - (lab && lab.hLeft ? hw : 0), x1: p.x + w / 2 + (lab && !lab.hLeft ? hw : 0) + charge,
+                          y0: p.y - 0.5 * fs - (charge ? 0.2 * fs : 0), y1: p.y + 0.5 * fs, h: fs };
+            // Real 3D directions (VSEPR from the conformer), turned with the molecule; screen y points down.
+            const dirs = (m.lone_pair_dirs || {})[String(i)] || [];
+            let endOn = false;
+            let turned = dirs.map(([x, y, z]) => {
+              const rx = R[0][0] * x + R[0][1] * y + R[0][2] * z, ry = R[1][0] * x + R[1][1] * y + R[1][2] * z;
+              if (Math.hypot(rx, ry) < 0.35) endOn = true;  // pointing at (or away from) the viewer
+              return Math.atan2(-ry, rx);
+            });
+            if (endOn) turned = null;  // a pair seen end-on has no meaningful screen direction: use the 2D spacing
+            drawElectrons(g, p.x, p.y, electronInfo, angles, lab ? lab.hLeft : false, box, ELEMENT_COLORS[atom.element] || INK, turned);
+          }
+          const tags = [];
+          if (this.numbering === "iupac" && this.locants[String(i)]) tags.push(this.locants[String(i)]);
+          if (this.numbering === "indices" && atom.index != null) tags.push(String(i));
+          if (atom.cip) tags.push(`(${atom.cip}${atom.arbitrary ? "?" : ""})`);
+          if (tags.length) {
+            const tag = svgEl("text", { x: (p.x + 0.45 * fs).toFixed(1), y: (p.y - 0.55 * fs).toFixed(1),
+              "font-size": Math.max(8, 0.55 * fs).toFixed(1), "font-family": "system-ui, sans-serif", fill: "#555555", "fill-opacity": op });
+            tag.textContent = tags.join(" ");
+            if (atom.arbitrary) {
+              const title = svgEl("title", {});
+              title.textContent = "Arbitrary: this stereocentre is unspecified in the input";
+              tag.append(title);
+            }
+            g.append(tag);
+          }
+        }
+      }
+      this.svg.replaceChildren(svgEl("rect", { x: 0, y: 0, width: this.W, height: this.H, fill: "#ffffff" }), g);
+    }
+  }
+
+  async function redraw(button, data, overrides) {
+    button.disabled = true;
+    // Keep showing the rotated picture until the redrawn molecule is lifted again (no flash of the flat drawing).
+    const lifted = root.querySelector("svg.lift");
+    liftSnapshot = lifted && lifted.style.display !== "none" ? lifted.cloneNode(true) : null;
+    const args = Object.assign({}, lastInput || {}, { smiles: data.input_smiles, atom_indices: true,
+                                                      numbering: data.numbering_requested || data.numbering_shown || "iupac",
+                                                      hydrogens: !!data.hydrogens_shown }, overrides);
+    if (data.label) args.label = data.label;
+    try {
+      const next = await callTool("draw_molecule", args);
+      if (next && (next.structuredContent || next.isError)) render(next);
+      else button.disabled = false;
+    } catch (err) {
+      button.disabled = false;
+      button.textContent = "Redraw failed";
+    }
+  }
+
+  function renderIsomers(data, meta) {
+    const isomers = data.isomers || [];
+    const svgs = meta.svgs || [];
+    root.append(el("header", {}, el("h1", {}, `${isomers.length} stereoisomer${isomers.length === 1 ? "" : "s"}`),
+                   el("code", { class: "formula" }, data.input_smiles || "")));
+    const grid = el("div", { class: "grid" });
+    isomers.forEach((iso, i) => {
+      const cip = (iso.stereocenters || []).map((c) => `${c.atom_index}${c.cip}`).join(", ");
+      const ez = (iso.double_bond_stereo || []).map((b) => b.configuration).join(", ");
+      const relation = iso.achiral ? "achiral (meso)" : iso.enantiomer_index != null ? `enantiomer of #${iso.enantiomer_index}` : "";
+      grid.append(el("div", { class: "card" },
+        svgs[i] ? canvas(svgs[i], "Stereoisomer " + iso.smiles) : null,
+        el("p", {}, el("strong", {}, `#${iso.index} `), [cip, ez].filter(Boolean).join("; ") || "—", relation ? ` · ${relation}` : ""),
+        el("p", {}, el("code", {}, iso.smiles))));
+    });
+    root.append(grid);
+    if (data.truncated) root.append(el("p", { class: "note" }, "List truncated at the requested limit."));
+    if (isomers.length > svgs.length) root.append(el("p", { class: "note" }, `Only the first ${svgs.length} isomers are drawn.`));
+    root.append(el("p", { class: "note" }, "Labels use zero-based input atom indices (e.g. 1R = atom 1 is R)."));
+  }
+  // Only now: ChatGPT may have injected window.openai before this script ran, and rendering needs every
+  // declaration above (classes are not hoisted).
+  fromOpenAiGlobals();
+})();
+</script>
+</body>
+</html>
