@@ -93,3 +93,42 @@ def test_viewer_fits_without_scrolling_and_view_survives_toggles():
                 await browser.close()
 
     asyncio.run(run())
+
+
+def test_inline_fits_a_host_that_caps_height_silently():
+    # Codex desktop: a wide window and a capped inline frame, with no maxHeight reported. The drawing is capped at
+    # 420 px inline, and if the frame stays shorter than requested the widget shrinks to fit it.
+    async def run():
+        params = StdioServerParameters(command=sys.executable, args=["-m", "moltalk.server"])
+        async with stdio_client(params) as (read, write), ClientSession(read, write) as client:
+            await client.initialize()
+            html = (await client.read_resource(WIDGET_URI)).contents[0].text
+
+            async def py_call_tool(raw):
+                request = json.loads(raw)
+                return json.dumps(dump(await client.call_tool(request["name"], request["arguments"])))
+
+            async with playwright_api.async_playwright() as pw:
+                channel = os.getenv("MOLTALK_UI_BROWSER_CHANNEL", "chrome")
+                browser = await pw.chromium.launch(channel=None if channel == "chromium" else channel)
+                page = await browser.new_page(viewport={"width": 1300, "height": 1000})
+                await page.expose_function("pyCallTool", py_call_tool)
+                await page.set_content(HOST_PAGE)
+                await page.evaluate("document.getElementById('w').style.cssText = 'width:1200px;height:900px;border:0'")
+                args = {"smiles": "CC(=O)Oc1ccccc1C(=O)O", "label": "aspirin"}
+                result = dump(await client.call_tool("draw_molecule", args))
+                await page.evaluate("([h, a, r]) => startWidget(h, a, r, 'light')", [html, args, result])
+                frame = page.frame_locator("#w")
+                box = frame.locator(".liftable")
+                await box.wait_for()
+                await page.wait_for_timeout(300)
+                assert (await box.bounding_box())["height"] <= 421  # wide window: capped, not 1200 * 420 / 640
+                # The host now holds the frame at 520 px without saying so.
+                await page.evaluate("document.getElementById('w').style.height = '520px'")
+                await page.wait_for_timeout(2000)
+                inner = page.frames[1]
+                fits = await inner.evaluate("() => document.getElementById('root').getBoundingClientRect().height")
+                assert fits <= 520 and await page.evaluate("window.lastHeight") <= 520
+                await browser.close()
+
+    asyncio.run(run())

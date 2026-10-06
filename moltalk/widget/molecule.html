@@ -193,7 +193,7 @@
     applyTheme(o.theme);
     if (o.displayMode) setDisplayMode(o.displayMode);
     if (o.safeArea) setInsets(o.safeArea.insets || o.safeArea);
-    if (o.maxHeight) setMaxHeight(o.maxHeight);
+    if (o.maxHeight) setMaxHeight(o.maxHeight, true);
     if (o.toolInput) lastInput = o.toolInput;
     if (o.toolOutput && !lastResult) render({ structuredContent: o.toolOutput, _meta: o.toolResponseMetadata || {} });
   }
@@ -205,18 +205,20 @@
     if (ctx.displayMode) setDisplayMode(ctx.displayMode);
     if (ctx.safeAreaInsets) setInsets(ctx.safeAreaInsets);
     const dims = ctx.containerDimensions;
-    if (dims && (dims.maxHeight || dims.height)) setMaxHeight(dims.maxHeight || dims.height);
+    if (dims && (dims.maxHeight || dims.height)) setMaxHeight(dims.maxHeight || dims.height, true);
   }
   let maxHeight = 0;
-  function setMaxHeight(px) {
+  function setMaxHeight(px, fromHost) {
     // The host's height limit for the inline widget: fit inside it rather than make the host add a scroll bar.
+    if (fromHost) hostCapKnown = true;
     if (+px > 200) {
       maxHeight = Math.floor(+px);
       document.documentElement.style.setProperty("--max-h", `${maxHeight}px`);
       fitInline();
     }
   }
-  const DETAILS_MIN = 72;  // always leave about three lines of the details box visible
+  const DETAILS_MIN = 72;
+  const INLINE_DRAWING_MAX = 420;  // always leave about three lines of the details box visible
   function fitInline() {
     // Inline under a height limit: shrink the drawing (never the controls) so header, drawing, controls and a
     // strip of the scrollable details all fit. The viewer lays itself out with CSS instead.
@@ -225,12 +227,17 @@
     const viewer = document.documentElement.dataset.mode === "viewer";
     box.classList.remove("fitted");
     box.style.height = "";
-    if (viewer || !maxHeight) { reportSize(); return; }
+    if (viewer) { reportSize(); return; }
     const natural = box.getBoundingClientRect().height;
-    const details = root.querySelector(".details");
-    const needed = details ? Math.min(details.scrollHeight, DETAILS_MIN) : 0;
-    const others = root.getBoundingClientRect().height - natural - (details ? details.getBoundingClientRect().height : 0);
-    const room = maxHeight - others - needed;
+    // Inline, the drawing is never taller than INLINE_DRAWING_MAX: its natural height grows with the width, and a
+    // wide host window (Codex desktop) made it taller than the host would show. The viewer shows it full size.
+    let room = INLINE_DRAWING_MAX;
+    if (maxHeight) {
+      const details = root.querySelector(".details");
+      const needed = details ? Math.min(details.scrollHeight, DETAILS_MIN) : 0;
+      const others = root.getBoundingClientRect().height - natural - (details ? details.getBoundingClientRect().height : 0);
+      room = Math.min(room, maxHeight - others - needed);
+    }
     if (room < natural) {
       box.classList.add("fitted");
       box.style.height = `${Math.max(160, Math.floor(room))}px`;
@@ -257,6 +264,7 @@
     if (theme === "dark" || theme === "light") document.documentElement.dataset.theme = theme;
   }
 
+  let reported = 0, hostCapKnown = false, clipTimer = null, clipSeen = 0;
   function reportSize() {
     // Inline only: in the viewer the host sizes us and the page is the window. Never report less than 280 px,
     // so a bad viewport during the fullscreen -> inline transition (a known iOS host issue) cannot collapse us.
@@ -265,6 +273,29 @@
     const height = Math.max(floor, Math.ceil(root.getBoundingClientRect().height));
     notify("ui/notifications/size-changed", { height });
     if (window.openai && typeof window.openai.notifyIntrinsicHeight === "function") window.openai.notifyIntrinsicHeight(height);
+    reported = height;
+    checkClipping();
+  }
+  // Some hosts cap the inline frame without telling us the limit (no containerDimensions.maxHeight or
+  // window.openai.maxHeight): the frame stays shorter than the height we asked for and the bottom is cut off. If
+  // that holds for over a second (two checks, so a host still resizing is not mistaken for a cap), take the frame's
+  // height as the limit and shrink the drawing to fit.
+  function checkClipping() {
+    clearTimeout(clipTimer);
+    clipTimer = setTimeout(() => {
+      const inner = window.innerHeight;
+      if (hostCapKnown || document.documentElement.dataset.mode === "viewer" || inner < 280 || inner >= reported - 4) {
+        clipSeen = 0;
+        return;
+      }
+      if (clipSeen && Math.abs(clipSeen - inner) < 2) {
+        clipSeen = 0;
+        setMaxHeight(inner);
+      } else {
+        clipSeen = inner;
+        checkClipping();
+      }
+    }, 600);
   }
   new ResizeObserver(reportSize).observe(root);
 
