@@ -1,10 +1,7 @@
-"""2D layout with a quality check and a Schlegel-style fallback for cages.
+"""2D layout with a quality check, textbook porphyrin layouts and 3D-view drawings for cages.
 
-RDKit's fused-ring depiction can fail badly on polyhedral cages (fullerenes,
-dodecahedrane): bonds stretch across the drawing and cross each other although
-the graph is planar. Such layouts are scored, and a Tutte (barycentric)
-embedding of the ring core is tried instead. For a 3-connected planar core,
-Tutte's theorem guarantees a crossing-free drawing: a Schlegel diagram.
+RDKit's fused-ring depiction fails on polyhedral cages (fullerenes, cubane, adamantane): bonds stretch across
+the drawing and cross. Such molecules are drawn as a view of their 3D shape, as textbooks do.
 """
 import re
 from functools import lru_cache
@@ -70,48 +67,105 @@ def _cage(mol) -> list[int]:
     return sorted(max(systems, key=len)) if systems else []
 
 
-def _tutte(core, adjacency, outer):
-    index = {a: k for k, a in enumerate(core)}
-    pos = np.zeros((len(core), 2))
-    for k, a in enumerate(outer):
-        t = 2 * np.pi * k / len(outer)
-        pos[index[a]] = (np.cos(t), np.sin(t))
-    fixed = set(outer)
-    free = [a for a in core if a not in fixed]
-    if not free:
-        return pos
-    col = {a: k for k, a in enumerate(free)}
-    lap = np.zeros((len(free), len(free)))
-    rhs = np.zeros((len(free), 2))
-    for a in free:
-        neighbours = adjacency[a]
-        lap[col[a], col[a]] = len(neighbours)
-        for b in neighbours:
-            if b in fixed:
-                rhs[col[a]] += pos[index[b]]
-            else:
-                lap[col[a], col[b]] -= 1
-    pos[[index[a] for a in free]] = np.linalg.solve(lap, rhs)
-    return pos
+def _views(count=120):
+    """Evenly spread viewing directions over a hemisphere (a view and its opposite give mirror-image pictures)."""
+    k = np.arange(count) + 0.5
+    z = k / count  # 0..1: one hemisphere
+    phi = np.pi * (1 + 5 ** 0.5) * k
+    r = np.sqrt(1 - z * z)
+    return np.column_stack([r * np.cos(phi), r * np.sin(phi), z])
 
 
-def _schlegel_candidates(mol):
-    core = _cage(mol)
-    if len(core) < 4:
+def _project_cage(mol):
+    """2D coordinates for a polyhedral cage (cubane, adamantane, dodecahedrane, C60) as a view of its 3D shape, the
+    way such molecules are drawn in textbooks. A flat layout cannot draw them without crossings, and a Schlegel
+    diagram puts inner atoms where their hydrogens have nowhere to go. The 3D model is the same one the rotated view
+    uses; of 120 viewing directions the one with fewest coinciding atoms, then fewest crossing bonds, is kept.
+    Shown hydrogens are projected from the same model, so they point outward. Sets the conformer in place."""
+    from .conformer import _embed, _spectral_sphere
+    heavy_ids = [a.GetIdx() for a in mol.GetAtoms() if a.GetAtomicNum() != 1]
+    skeleton = Chem.RWMol(mol)
+    for i in sorted((a.GetIdx() for a in mol.GetAtoms() if a.GetAtomicNum() == 1), reverse=True):
+        skeleton.RemoveAtom(i)
+    skeleton = skeleton.GetMol()
+    skeleton.UpdatePropertyCache(strict=False)
+    Chem.GetSymmSSSR(skeleton)
+    try:
+        embedded, _ = _embed(skeleton, 1)
+    except ValueError:
+        # A substituted fullerene (PCBM): ETKDG cannot embed it. View the cage alone (from its spectral sphere) and
+        # let RDKit lay out the rest around the fixed cage.
+        cage = _cage(skeleton)
+        sphere = _spectral_sphere(skeleton, cage)
+        flat = _best_view(sphere, [(cage.index(b.GetBeginAtomIdx()), cage.index(b.GetEndAtomIdx()))
+                                   for b in skeleton.GetBonds()
+                                   if b.GetBeginAtomIdx() in cage and b.GetEndAtomIdx() in cage], list(range(len(cage))))
+        coord_map = {heavy_ids[a]: Point2D(*flat[k]) for k, a in enumerate(cage)}
+        with rdBase.BlockLogs():
+            rdDepictor.Compute2DCoords(mol, coordMap=coord_map)
         return
-    core_set = set(core)
-    adjacency = {a: [n.GetIdx() for n in mol.GetAtomWithIdx(a).GetNeighbors() if n.GetIdx() in core_set] for a in core}
-    rings = [r for r in mol.GetRingInfo().AtomRings() if set(r) <= core_set]
-    faces = sorted(rings, key=len, reverse=True)[:MAX_OUTER_FACES]
-    for outer in faces:
-        try:
-            base = _tutte(core, adjacency, list(outer))
-        except np.linalg.LinAlgError:
-            continue
-        radius = np.linalg.norm(base, axis=1, keepdims=True)
-        for alpha in ALPHAS:
-            pos = base * np.where(radius > 0, np.power(radius, alpha - 1, where=radius > 0, out=np.ones_like(radius)), 0)
-            yield core, pos
+    pos3 = embedded.GetConformer().GetPositions()
+    # 3D position of every atom of mol: heavy atoms by order, hydrogens by rank on their parent.
+    where = {}
+    for k, i in enumerate(heavy_ids):
+        where[i] = pos3[k]
+    hydrogens = {}
+    for atom in embedded.GetAtoms():
+        if atom.GetAtomicNum() == 1 and atom.GetDegree() == 1:
+            hydrogens.setdefault(atom.GetNeighbors()[0].GetIdx(), []).append(atom.GetIdx())
+    rank = {}
+    for atom in mol.GetAtoms():
+        if atom.GetAtomicNum() == 1 and atom.GetDegree() == 1:
+            parent = heavy_ids.index(atom.GetNeighbors()[0].GetIdx())
+            r = rank.get(parent, 0)
+            rank[parent] = r + 1
+            spare = hydrogens.get(parent, [])
+            where[atom.GetIdx()] = pos3[spare[r]] if r < len(spare) else pos3[parent]
+    xyz = np.array([where[i] for i in range(mol.GetNumAtoms())])
+    xyz -= xyz[heavy_ids].mean(axis=0)
+    heavy_bonds = [(b.GetBeginAtomIdx(), b.GetEndAtomIdx()) for b in mol.GetBonds()
+                   if b.GetBeginAtom().GetAtomicNum() != 1 and b.GetEndAtom().GetAtomicNum() != 1]
+    flat = _best_view(xyz, heavy_bonds, heavy_ids)
+    conf = Chem.Conformer(mol.GetNumAtoms())
+    for i, (px, py) in enumerate(flat):
+        conf.SetAtomPosition(i, Point3D(float(px), float(py), 0.0))
+    mol.RemoveAllConformers()
+    mol.AddConformer(conf, assignId=True)
+
+
+def _best_view(xyz, heavy_bonds, heavy_ids):
+    """Project 3D points (all atoms; heavy_ids are the heavy ones) along the viewing direction with fewest coinciding
+    heavy atoms, then fewest coinciding hydrogens, then fewest crossing bonds; longest extent horizontal; scaled to
+    RDKit's 1.5 bond length."""
+    xyz = xyz - xyz[heavy_ids].mean(axis=0)
+    bond = float(np.median([np.linalg.norm(xyz[a] - xyz[b]) for a, b in heavy_bonds])) or 1.0
+    best = None
+    for view in _views():
+        z = view / np.linalg.norm(view)
+        x = np.cross([0.0, 1.0, 0.0] if abs(z[1]) < 0.9 else [1.0, 0.0, 0.0], z)
+        x /= np.linalg.norm(x)
+        y = np.cross(z, x)
+        flat = xyz @ np.column_stack([x, y])
+        h = flat[heavy_ids]
+        d = np.linalg.norm(h[:, None] - h[None], axis=2)
+        coincide = int((np.triu(d < 0.35 * bond, 1)).sum())
+        everything = np.linalg.norm(flat[:, None] - flat[None], axis=2)
+        crowded = int((np.triu(everything < 0.3 * bond, 1)).sum()) - coincide if len(flat) > len(h) else 0
+        key = (coincide, crowded, _crossings(flat, heavy_bonds), -float(np.min(d + np.eye(len(h)) * 1e9)))
+        if best is None or key < best[0]:
+            best = (key, flat)
+    flat = best[1]
+    h = flat[heavy_ids] - flat[heavy_ids].mean(axis=0)
+    _, _, vt = np.linalg.svd(h)
+    return (flat - flat[heavy_ids].mean(axis=0)) @ vt.T * (1.5 / bond)
+
+
+def _is_cage(mol) -> bool:
+    """Polyhedral cages have atoms shared by three or more rings (cubane, adamantane, C60)."""
+    heavy = [a for a in mol.GetAtoms() if a.GetAtomicNum() != 1]
+    Chem.GetSymmSSSR(mol)  # ring information may have been cleared by editing the molecule
+    ring_info = mol.GetRingInfo()
+    return any(ring_info.NumAtomRings(a.GetIdx()) >= 3 for a in heavy)
 
 
 def _chelated_metal(mol):
@@ -271,6 +325,9 @@ def layout(mol) -> dict:
         skeleton.UpdatePropertyCache(strict=False)
         Chem.GetSymmSSSR(skeleton)  # removing atoms clears the ring information the layout code relies on
         result = layout(skeleton)
+        if result["method"] == "projection":
+            _project_cage(mol)  # hydrogens from the same 3D view, pointing outward
+            return {**result, **quality(mol)}
         conf = skeleton.GetConformer()
         coord_map = {heavy_ids[k]: Point2D(conf.GetAtomPosition(k).x, conf.GetAtomPosition(k).y) for k in range(len(heavy_ids))}
         with rdBase.BlockLogs():
@@ -314,44 +371,17 @@ def layout(mol) -> dict:
     result = {"method": "rdkit", **best_q}
     if not (best_q["bond_crossings"] or best_q["stretched_bonds"] or best_q["overlapping_atoms"]):
         return result
-    # Schlegel diagrams are for polyhedral cages (C60, cubane, dodecahedrane), whose atoms sit in three or more rings.
-    # A merely crowded ordinary layout (FAD with hydrogens) must never be swapped for one.
-    Chem.GetSymmSSSR(mol)  # make sure ring information exists (it may have been cleared by editing the molecule)
-    ring_info = mol.GetRingInfo()
-    if not any(ring_info.NumAtomRings(a.GetIdx()) >= 3 for a in mol.GetAtoms()):
+    # A cage cannot be drawn flat without crossings: draw it as a view of its 3D shape instead. A merely crowded
+    # ordinary layout keeps RDKit's.
+    if not _is_cage(mol):
         return result
-    best_conf = Chem.Conformer(mol.GetConformer())
-    core_bond_length = 1.5
-    for core, pos in _schlegel_candidates(mol):
-        trial = Chem.Mol(mol)
-        # Scale so a typical core bond has RDKit's usual length, then let RDKit place substituents.
-        lengths = [np.linalg.norm(pos[i] - pos[j]) for i, a in enumerate(core) for j, b in enumerate(core)
-                   if i < j and trial.GetBondBetweenAtoms(a, b)]
-        scale = core_bond_length / (float(np.median(lengths)) or 1.0)
-        coord_map = {a: Point2D(*(pos[k] * scale)) for k, a in enumerate(core)}
-        # Point each substituent's first atom away from the cage centre so RDKit grows it outward.
-        centre = pos.mean(axis=0) * scale
-        core_set = set(core)
-        for k, a in enumerate(core):
-            outside = [n.GetIdx() for n in trial.GetAtomWithIdx(a).GetNeighbors() if n.GetIdx() not in core_set]
-            direction = pos[k] * scale - centre
-            base_angle = np.arctan2(direction[1], direction[0])
-            for m, b in enumerate(outside):
-                if b in coord_map:
-                    continue
-                angle = base_angle + (m - (len(outside) - 1) / 2) * np.pi / 3
-                coord_map[b] = Point2D(*(pos[k] * scale + core_bond_length * np.array([np.cos(angle), np.sin(angle)])))
-        try:
-            with rdBase.BlockLogs():  # rejected candidates can trip RDKit invariant messages
-                rdDepictor.Compute2DCoords(trial, coordMap=coord_map)
-        except Exception:
-            continue
-        q = quality(trial)
-        if _score(q) < _score(best_q):
-            best_q, best_conf = q, Chem.Conformer(trial.GetConformer())
-            result = {"method": "schlegel", **q}
-            if q["bond_crossings"] == 0 and q["overlapping_atoms"] == 0 and q["stretched_bonds"] == 0:
-                break
+    trial = Chem.Mol(mol)
+    try:
+        _project_cage(trial)
+    except Exception:  # noqa: BLE001 - no 3D model: keep RDKit's layout
+        return result
+    best_conf = Chem.Conformer(trial.GetConformer())
+    result = {"method": "projection", **quality(trial)}
     mol.RemoveAllConformers()
     mol.AddConformer(best_conf, assignId=True)
     return result

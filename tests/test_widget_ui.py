@@ -96,10 +96,10 @@ def test_widget_renders_and_calls_tools():
                                                                                      "hydrogens": False, "numbering": "none"}}
                 assert await frame.locator(".canvas").inner_html() != svg_before
 
-                # 2b. Cage: Schlegel layout with its explanatory note.
+                # 2b. Cage: drawn as a view of its 3D shape, with its explanatory note.
                 from test_depiction import C60
                 await show("draw_molecule", {"smiles": C60, "label": "Buckminsterfullerene"})
-                await frame.get_by_text("Schlegel diagram.").wait_for()
+                await frame.get_by_text("3D view.").wait_for()
                 if SCREENSHOT_DIR:
                     await page.screenshot(path=os.path.join(SCREENSHOT_DIR, "c60.png"), full_page=True)
 

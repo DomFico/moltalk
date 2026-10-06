@@ -19,7 +19,7 @@
   body { margin: 0; background: var(--bg); color: var(--fg);
          font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   html, body { overflow: hidden; }  /* the page itself never scrolls; only the details box below does */
-  :root[data-compact] main { min-height: 0; padding: 6px 16px; }
+  :root[data-compact] main { min-height: 0; padding: 0; }
   main { padding: 26px 16px 14px; min-height: 280px; display: flex; flex-direction: column; max-height: var(--max-h, none); }
   main > .stage { flex: 0 0 auto; }
   .details { flex: 0 1 auto; min-height: 0; max-height: 132px; overflow-y: auto; margin-top: 8px; padding-right: 6px;
@@ -378,8 +378,8 @@
     } else if (data.kind === "file") {
       renderFile(data, meta, result);
     } else if (data.repeat_of_previous) {
-      // ChatGPT sometimes re-sends the first draw of a chat; the drawing is already shown just above.
-      root.append(el("p", { class: "note" }, `Same drawing as above${data.label ? ` (${data.label})` : ""}.`));
+      // ChatGPT sometimes re-sends the first draw of a chat although the drawing is already shown just above:
+      // show nothing rather than a second copy (or a note about the host's repeat).
       document.documentElement.dataset.compact = "1";
     } else if (data.kind === "molecule" || data.analysis) {
       renderMolecule(data, meta);
@@ -455,7 +455,7 @@
     if (check && check.status === "mismatch") details.prepend(el("p", { class: "note warn-text" }, el("strong", {}, "Not this compound. "), check.message));
     else if (check && check.status === "stereo differs") details.prepend(el("p", { class: "note warn-text" }, el("strong", {}, "Stereo differs. "), check.message));
     const depiction = data.depiction || {};
-    if (depiction.note) details.append(el("p", { class: "note" }, el("strong", {}, "Schlegel diagram. "), depiction.note));
+    if (depiction.note) details.append(el("p", { class: "note" }, el("strong", {}, "3D view. "), depiction.note));
     if (depiction.warning) details.append(el("p", { class: "note warn-text" }, el("strong", {}, "Layout caveat. "), depiction.warning));
     if (depiction.coordination_note) details.append(el("p", { class: "note" }, el("strong", {}, "Metal bonds. "), depiction.coordination_note));
     root.append(details);

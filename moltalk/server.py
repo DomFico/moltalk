@@ -14,17 +14,17 @@ from .export import export_structure as write_structure, MAX_EMBED_BYTES
 from .limits import runner
 from .naming import name_and_locants, pubchem_slot
 
-WIDGET_URI = "ui://widget/molecule-v23.html"
+WIDGET_URI = "ui://widget/molecule-v24.html"
 WIDGET_MIME = "text/html;profile=mcp-app"
 WIDGET_HTML = files("moltalk").joinpath("widget/molecule.html").read_text(encoding="utf-8")
 
 INSTRUCTIONS = """RDKit chemistry tools. Workflow rules:
-- For a compound name, call resolve_name first and use its canonical_smiles. It works offline for thousands of common compounds and any systematic IUPAC name; allow_network=true additionally lets it try PubChem. Report the source, PubChem CID/IUPAC name and stereo_summary; say explicitly when stereochemistry is missing or partial.
+- To draw a compound by name, call draw_named_molecule once: it resolves and draws in one call. To look a name up without drawing, call resolve_name and use its canonical_smiles. It works offline for thousands of common compounds and any systematic IUPAC name; allow_network=true additionally lets it try PubChem. Report the source, PubChem CID/IUPAC name and stereo_summary; say explicitly when stereochemistry is missing or partial.
 - If you write SMILES yourself from a stereo-specific name, check the returned CIP labels against the name's descriptors and say whether they match.
-- To show a structure, call draw_molecule; the drawing renders inline for the user, and you receive the analysis plus depicted_stereo_bonds. Each call opens a new viewer, so draw a molecule once per reply: the viewer itself has controls for hydrogens, atom numbers, stereo labels, lone pairs, 3D rotation and image export, so never redraw just to change those.
+- To show a structure from SMILES, call draw_molecule; the drawing renders inline for the user, and you receive the analysis plus depicted_stereo_bonds. Each call opens a new viewer, so draw a molecule once per reply: the viewer itself has controls for hydrogens, atom numbers, stereo labels, lone pairs, 3D rotation and image export, so never redraw just to change those.
 - Atom indices are zero-based input-SMILES indices, not IUPAC locants. When draw_molecule returns locants (from the verified IUPAC name), refer to atoms by locant (e.g. C6a) and use indices only internally. Never invent locants or names the tools did not return.
 - Explain wedges/dashes only from depicted_stereo_bonds of that drawing; wedge/dash is not a synonym for R/S.
-- If draw_molecule's depiction has method 'schlegel' or a warning, tell the user what that means for the picture before describing it.
+- If draw_molecule's depiction has method 'projection' (a cage drawn as a view of its 3D shape) or a warning, tell the user what that means for the picture before describing it.
 - For follow-up questions about the same molecule, reuse the canonical_smiles from the earlier result instead of re-deriving it.
 - If a tool returns an error, report it; never substitute or invent a different structure.
 - If resolve_name cannot resolve a name (unknown, ambiguous, or stereo not stated), do not write a SMILES for it from memory. Tell the user what the tool said and ask for a structure, a SMILES or a more specific name. Only if the user then asks you to proceed from your own knowledge may you write the SMILES; say plainly that it is unverified by MolTalk.
@@ -73,7 +73,7 @@ async def analyze_molecule(smiles: str) -> dict[str, Any]:
 async def draw_molecule(smiles: str, label: str | None = None, width: int = 640, height: int = 420,
                         numbering: str = "iupac", atom_indices: bool = True, hydrogens: bool = False,
                         include_svg: bool = False, ctx: Context | None = None) -> CallToolResult:
-    """Draw a molecule inline for the user from SMILES (RDKit 2D depiction with atom indices and R/S labels). Returns the full analysis and depicted_stereo_bonds (this drawing's wedges/dashes, each with an explanation). label is an optional display caption, e.g. the compound name. numbering: "iupac" (parent-chain/ring locants from the verified IUPAC name, when they can be determined without ambiguity; otherwise atom indices), "indices" or "none". hydrogens=true draws every hydrogen explicitly. include_svg=true also returns the raw SVG text (only for clients without the inline viewer)."""
+    """Draw and render a molecule inline for the user from SMILES, in a single call. A successful result (rendered: true) means the drawing is already displayed to the user: do not call draw_molecule again with the same arguments to verify, inspect, retrieve or display it; read structuredContent instead. For a compound name, use draw_named_molecule. Returns the full analysis and depicted_stereo_bonds (this drawing's wedges/dashes, each with an explanation). label: display caption, e.g. the compound name. numbering: "iupac" (parent-chain/ring locants from the verified IUPAC name, when they can be determined without ambiguity; otherwise atom indices), "indices" or "none". hydrogens=true draws every hydrogen explicitly. include_svg=true also returns the raw SVG text (only for clients without the inline viewer)."""
     if numbering not in ("iupac", "indices", "none"):
         raise ValueError('numbering must be "iupac", "indices" or "none".')
     if not atom_indices:
@@ -91,7 +91,7 @@ async def draw_molecule(smiles: str, label: str | None = None, width: int = 640,
         if naming["locants"].get(str(centre["atom_index"])):
             centre["locant"] = naming["locants"][str(centre["atom_index"])]
     repeated = _repeated_draw(ctx, [smiles, label, width, height, numbering, atom_indices, hydrogens, include_svg])
-    structured = {"kind": "molecule", "label": label[:120] if label else None, "input_smiles": smiles,
+    structured = {"kind": "molecule", "rendered": True, "label": label[:120] if label else None, "input_smiles": smiles,
                   "numbering_requested": numbering, "numbering_shown": shown, "atom_indices_shown": shown != "none",
                   "hydrogens_shown": hydrogens, "label_check": _check_label(label, checked["inchikey"]),
                   **naming, **result}
@@ -113,7 +113,8 @@ async def draw_molecule(smiles: str, label: str | None = None, width: int = 640,
         name_text = f"WARNING: {check['message']} " + name_text
     elif check and check["status"] == "stereo differs":
         name_text = f"Note: {check['message']} " + name_text
-    text = (f"Drew {label or a['canonical_smiles']} ({a['formula']}); canonical SMILES {a['canonical_smiles']}. " + name_text +
+    text = (f"Rendered {label or a['canonical_smiles']} inline for the user (already displayed; do not call again to show it). "
+            f"Drew {label or a['canonical_smiles']} ({a['formula']}); canonical SMILES {a['canonical_smiles']}. " + name_text +
             f"CIP centers (zero-based input indices): {centers}. Stereo: {a['stereo_summary']['status']}. "
             f"Drawing: {wedges} Functional-group motifs: {', '.join(a['functional_groups']) or 'none matched'}.")
     depiction = result["depiction"]
@@ -149,6 +150,22 @@ def _check_label(label: str | None, inchikey: str) -> dict | None:
                 "message": f"Same connectivity as {c['title']} (PubChem CID {c['cid']}), but different or unspecified stereochemistry."}
     return {"status": "matches", "library_cid": same[0]["cid"],
             "message": f"The structure matches {same[0]['title']} (PubChem CID {same[0]['cid']})."}
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True),
+          meta=_ui_meta("Drawing molecule…", "Molecule drawn"))
+async def draw_named_molecule(name: str, numbering: str = "iupac", hydrogens: bool = False, allow_network: bool = False,
+                              ctx: Context | None = None) -> CallToolResult:
+    """Use this when the user asks to draw a molecule by name ("draw cubane", "show me FAD"): it resolves the name and renders the drawing inline in one call. Do not call resolve_name first, and do not call draw_molecule afterwards unless the user asks for a modified structure. A successful result (rendered: true) is already displayed; never call again to verify it. Resolution is the same as resolve_name (MolTalk's library, then OPSIN for systematic names, then PubChem only if allow_network=true); an ambiguous or unknown name, or one that does not say which stereoisomer, is an error and nothing is drawn. numbering and hydrogens are as in draw_molecule."""
+    resolved = await resolve_name(name, allow_network)
+    result = await draw_molecule(resolved["canonical_smiles"], label=name.strip()[:120], numbering=numbering,
+                                 hydrogens=hydrogens, ctx=ctx)
+    identity = {k: resolved[k] for k in ("source", "cid", "title", "iupac_name", "pubchem_url", "note", "warning")
+                if resolved.get(k) is not None}
+    result.structuredContent["resolved"] = identity
+    said = f"Resolved '{name}' with {resolved['source']}" + (f" (PubChem CID {resolved['cid']}, {resolved.get('title')})" if resolved.get("cid") else "") + ". "
+    extra = " ".join(x for x in (resolved.get("note"), resolved.get("warning")) if x)
+    result.content[0].text = said + (extra + " " if extra else "") + result.content[0].text
+    return result
 
 _last_draw: dict[str, tuple[str, float]] = {}
 

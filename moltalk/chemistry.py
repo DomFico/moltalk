@@ -116,6 +116,8 @@ def _svg(mol, width: int, height: int, atom_indices: bool, locants: dict | None 
     drawer = rdMolDraw2D.MolDraw2DSVG(width, height)
     drawer.drawOptions().addAtomIndices = atom_indices and not locants
     drawer.drawOptions().addStereoAnnotation = True
+    if depiction["method"] == "projection":
+        drawer.drawOptions().flagCloseContactsDist = -1  # a 3D view overlaps atoms by design; no red error boxes
     if locants:
         # IUPAC locants as atom notes; RDKit still draws its own (R)/(S) beside them.
         for atom in mol.GetAtoms():
@@ -145,10 +147,11 @@ def _svg(mol, width: int, height: int, atom_indices: bool, locants: dict | None 
     return drawer.GetDrawingText(), bonds, _depiction_note(depiction), atom_px
 
 def _depiction_note(depiction: dict) -> dict:
-    if depiction["method"] == "schlegel":
-        depiction["note"] = ("The cage is shown as if viewed through one ring, which becomes the outer "
-                             "ring; bond lengths and ring sizes are distorted by the projection, but connectivity is exact. "
-                             "RDKit's standard layout was rejected because its bonds crossed or stretched.")
+    if depiction["method"] == "projection":
+        depiction["note"] = ("This cage cannot be drawn flat without bonds crossing, so it is drawn as a view of its 3D "
+                             "shape, as textbooks draw cubane or adamantane: bonds that cross pass in front of or behind "
+                             "each other, and lengths and angles are foreshortened. Connectivity is exact.")
+        return depiction  # crossings are expected in a 3D view; no layout warning
     if depiction["bond_crossings"] or depiction["overlapping_atoms"]:
         depiction["warning"] = (f"This 2D layout has {depiction['bond_crossings']} crossing bond pair(s) and "
                                 f"{depiction['overlapping_atoms']} overlapping atom pair(s), which is common for bridged "

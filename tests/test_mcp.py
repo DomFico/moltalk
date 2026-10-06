@@ -27,7 +27,7 @@ def stdio_session(test):
 def test_stdio_client():
     async def test(client):
         tools = await client.list_tools()
-        assert len(tools.tools) == 7
+        assert len(tools.tools) == 8
         result = await client.call_tool('analyze_molecule', {'smiles': 'CCO'})
         assert not result.isError
         assert result.structuredContent['formula'] == 'C2H6O'
@@ -175,3 +175,14 @@ def test_identical_repeated_draw_in_a_session_is_collapsed():
     asyncio.run(draw_molecule("CCO", label="ethanol", hydrogens=True, ctx=ctx("s3")))
     asyncio.run(draw_molecule("CCO", label="ethanol", ctx=ctx("s3")))
     assert not asyncio.run(draw_molecule("CCO", label="ethanol", hydrogens=True, ctx=ctx("s3"))).structuredContent.get("repeat_of_previous")
+
+
+def test_draw_named_molecule_resolves_and_draws_in_one_call():
+    from moltalk.server import draw_named_molecule
+    result = asyncio.run(draw_named_molecule("cubane"))
+    data = result.structuredContent
+    assert data["rendered"] and data["kind"] == "molecule" and data["label"] == "cubane"
+    assert data["resolved"]["cid"] == 136090 and data["analysis"]["formula"] == "C8H8"
+    assert result.content[0].text.startswith("Resolved 'cubane'") and "already displayed" in result.content[0].text
+    with pytest.raises(ValueError, match="does not say which stereoisomer"):
+        asyncio.run(draw_named_molecule("alanine"))

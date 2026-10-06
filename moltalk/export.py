@@ -85,8 +85,8 @@ def export_structure(smiles: str, fmt: str = "cdxml", coordinates: str | None = 
         if hydrogens:
             mol = Chem.AddHs(mol)
         depiction = layout(mol)  # the same deterministic layout the drawing uses
-        if depiction.get("method") == "schlegel":
-            notes.append("2D coordinates are a Schlegel diagram (cage viewed through one ring), as in the drawing.")
+        if depiction.get("method") == "projection":
+            notes.append("2D coordinates are a projection of the cage's 3D shape, as in the drawing (bonds cross).")
         mol.SetProp("_Name", title)
         if fmt == "cdxml":
             text = rdChemDraw.MolToChemDrawBlock(mol)

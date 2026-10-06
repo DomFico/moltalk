@@ -21,7 +21,7 @@ moltalk  (.venv/bin/moltalk → RDKit worker processes with time/memory limits)
 | Install in an isolated venv (`.venv`, Python 3.12, RDKit 2026.03.6, mcp 1.30.0) | **Verified** |
 | Test suite: 106 tests (104 offline by default; 2 live PubChem tests need `MOLTALK_NETWORK_TESTS=1`), including live PubChem and real-browser tests of the drawing, its 3D rotation, zoom, hydrogens and a phone touch screen | **Verified** (`pytest`) |
 | Tools and widget through official MCP clients (Python SDK over stdio/HTTP, MCP Inspector CLI) | **Verified** |
-| UI resource metadata (`ui://widget/molecule-v23.html`, `text/html;profile=mcp-app`, `_meta.ui.resourceUri` + `openai/outputTemplate`) | **Verified** |
+| UI resource metadata (`ui://widget/molecule-v24.html`, `text/html;profile=mcp-app`, `_meta.ui.resourceUri` + `openai/outputTemplate`) | **Verified** |
 | Widget rendering in a sandboxed iframe through the MCP Apps bridge, plus a follow-up `tools/call` from the widget | **Verified** in Chrome with a host harness that imitates ChatGPT (`tests/test_widget_ui.py`, `tests/test_widget_3d.py`) |
 | tunnel-client → stdio server path | **Verified** with tunnel-client's local control plane (`scripts/local-tunnel-test.sh`) |
 | Name resolution: bundled library (22,038 compounds), OPSIN for systematic names, live PubChem fallback | **Verified** (`tests/test_library.py`; PubChem with `MOLTALK_NETWORK_TESTS=1`) |
@@ -119,7 +119,7 @@ The widget's **Hide/Show atom indices** button redraws the structure through a f
 | Start automatically at login (optional) | `systemctl --user enable moltalk-tunnel` |
 | Remove the service | `scripts/uninstall-service.sh`. To also remove the key and profile: `rm -r ~/.config/moltalk` |
 
-After changing tool metadata or the widget: restart (`scripts/start.sh`), then in ChatGPT open the plugin under **Plugins** → **Refresh**, and start a new chat. If you change the widget substantially, bump the version in its URI (`molecule-v23` → `v24`), because ChatGPT caches templates.
+After changing tool metadata or the widget: restart (`scripts/start.sh`), then in ChatGPT open the plugin under **Plugins** → **Refresh**, and start a new chat. If you change the widget substantially, bump the version in its URI (`molecule-v24` → `v25`), because ChatGPT caches templates.
 
 ### If the Tunnel option is unavailable
 
@@ -133,11 +133,12 @@ A public HTTPS endpoint is the documented alternative. ChatGPT accepts only **OA
 | `draw_molecule(smiles, label?, width, height, atom_indices, include_svg)` | **yes** | full analysis + `depicted_stereo_bonds` (each wedge/dash with a plain-language explanation) |
 | `enumerate_stereoisomers(smiles, limit)` | **yes** (grid) | isomers with CIP labels, `achiral` (meso) flag, `enantiomer_index` |
 | `find_substructure(smiles, smarts)` | no | chirality-aware matches (≤100) |
+| `draw_named_molecule(name, numbering, hydrogens, allow_network)` | yes | resolves a compound name (as `resolve_name`) and draws it in one call; the preferred tool for "draw X" |
 | `export_structure(smiles, format, coordinates, name, hydrogens)` | yes (download card) | a structure file: `cdxml` (ChemDraw, default), `mol`, `sdf`, `pdb`, `xyz` or `smiles`; 2D (the drawing's layout) or 3D (one conformer, explicit H); warnings when a 3D file fixes unspecified stereo |
 | `conformer_3d(smiles)` | viewer-only | one calculated 3D conformer aligned to the flat drawing, for rotating it (hidden from the model) |
 | `resolve_name(name, allow_network)` | no | structure from the bundled library, OPSIN or (opt-in) PubChem, with source, CID, title, IUPAC name, `stereo_summary` and warnings; ambiguous or unknown names are errors |
 
-**UI component.** `moltalk/widget/molecule.html` is registered as `ui://widget/molecule-v23.html` (`text/html;profile=mcp-app`) with an empty CSP allowlist, so it makes no network requests. It uses the MCP Apps bridge (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`, `ui/notifications/size-changed`) and falls back to `window.openai`. The SVG is sent only in the result's `_meta`, which ChatGPT passes to the widget but not to the model; the chemistry data stays in `structuredContent` for the model. The SVG is sanitized before insertion. Pass `include_svg=true` for clients without UI support.
+**UI component.** `moltalk/widget/molecule.html` is registered as `ui://widget/molecule-v24.html` (`text/html;profile=mcp-app`) with an empty CSP allowlist, so it makes no network requests. It uses the MCP Apps bridge (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`, `ui/notifications/size-changed`) and falls back to `window.openai`. The SVG is sent only in the result's `_meta`, which ChatGPT passes to the widget but not to the model; the chemistry data stays in `structuredContent` for the model. The SVG is sanitized before insertion. Pass `include_svg=true` for clients without UI support.
 
 **Rotate the drawing in 3D.** Grab the flat drawing and drag (one finger on a phone). Over the first ~90 px it lifts off the page into 3D and keeps rotating as a chemical drawing:
 - **Drawing style:** flat colour, implicit carbons, element labels with their hydrogens (OH/HO, NH₂) in RDKit's colours, half-coloured bonds, ring double bonds on the inner side, and gaps where a bond passes in front of another.
@@ -238,7 +239,7 @@ Rebuild the library with `.venv/bin/python scripts/build_library.py` (network, J
 
 **Hydrogens.** With **Show hydrogens**, the heavy-atom skeleton is laid out first (with every fix in this section), then the hydrogens are placed around it, so both drawings share one skeleton. RDKit's all-at-once layout is used instead only when it has strictly fewer crossings, overlaps and stretched bonds (glucose, morphine). Laying out everything at once had left FAD crowded enough to trigger the cage fallback.
 
-**Drawing quality check.** Every layout is scored for bond crossings, stretched bonds and overlapping atoms (`moltalk/depiction.py`). RDKit's standard layout fails on polyhedral cages: for C₆₀ it produced 37 crossing bond pairs and bonds up to 16× normal length. When that happens in a polyhedral cage (atoms shared by three or more rings), the largest ring system is redrawn as a **Schlegel diagram** using a Tutte embedding, which is crossing-free for polyhedral cages. The server tries each ring as the outer face, places substituents outward, and keeps the result only if it scores better. The `depiction` field reports the method and quality, and an imperfect layout carries a caveat in both the widget and the model's result. Tested on C₆₀, C₇₀, PCBM, dodecahedrane and cubane; ordinary molecules keep RDKit's layout.
+**Drawing quality check.** Every layout is scored for bond crossings, stretched bonds and overlapping atoms (`moltalk/depiction.py`). RDKit's flat layout fails on polyhedral cages: for C₆₀ it produced 37 crossing bond pairs and bonds up to 16× normal length. Cages (atoms shared by three or more rings) are therefore drawn the way textbooks draw them: as a view of their 3D shape. The 3D model is the same one the rotated view uses. Of 120 viewing directions, the one with the fewest coinciding atoms, then fewest crossing bonds, is kept. Cubane comes out as a cube in perspective and adamantane as its familiar cage. Shown hydrogens are projected from the same model, so they point outward; in the earlier Schlegel diagrams, inner atoms' hydrogens piled up in the middle. A substituted fullerene (PCBM) projects the cage, and RDKit places the side chain around it. Crossings are expected in such a view, so it carries a note instead of a layout warning, and RDKit's red close-contact boxes are turned off. Ordinary molecules keep RDKit's layout. Tested on cubane, adamantane, dodecahedrane, C₆₀ and PCBM, with and without hydrogens.
 
 **Server instructions** tell the model to resolve names through `resolve_name`, check CIP labels against stereo descriptors in a name, explain wedges only from `depicted_stereo_bonds`, reuse `canonical_smiles` in follow-ups, and never substitute a structure after an error.
 

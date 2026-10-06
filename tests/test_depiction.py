@@ -9,17 +9,35 @@ PCBM = "COC(=O)CCCC1(C23C14C5=C6C7=C8C5=C9C1=C5C%10=C%11C%12=C%13C%10=C%10C1=C8C
 DODECAHEDRANE = "C12C3C4C5C1C6C7C2C8C3C9C4C%10C5C6C%11C7C8C9C%10%11"
 
 
-@pytest.mark.parametrize("smiles", [C60, PCBM, DODECAHEDRANE])
-def test_cages_get_crossing_free_schlegel_layout(smiles):
+CUBANE, ADAMANTANE = "C12C3C4C1C5C2C3C45", "C1C2CC3CC1CC(C2)C3"
+
+
+@pytest.mark.parametrize("smiles", [C60, PCBM, DODECAHEDRANE, CUBANE, ADAMANTANE])
+def test_cages_are_drawn_as_a_view_of_their_3d_shape(smiles):
     plain = Chem.MolFromSmiles(smiles)
     from rdkit.Chem import rdDepictor
     from moltalk.depiction import quality
     rdDepictor.Compute2DCoords(plain)
-    assert quality(plain)["bond_crossings"] > 0  # RDKit's default layout of these cages is broken
-    depiction = draw(smiles)["depiction"]
-    assert depiction["method"] == "schlegel"
-    assert depiction["bond_crossings"] == 0 and depiction["overlapping_atoms"] == 0
-    assert "viewed through one ring" in depiction["note"] and "warning" not in depiction
+    assert quality(plain)["bond_crossings"] or quality(plain)["stretched_bonds"]  # RDKit's flat layout is broken
+    for hydrogens in (False, True):
+        depiction = draw(smiles, 640, 420, True, hydrogens)["depiction"]
+        assert depiction["method"] == "projection" and depiction["max_bond_length_ratio"] <= 2.0  # projection foreshortens bonds
+        assert "3D shape" in depiction["note"] and "warning" not in depiction
+
+
+def test_cage_hydrogens_point_outward():
+    # In the old Schlegel diagram the inner atoms' hydrogens piled up in the middle; projected from 3D they point out.
+    import numpy as np
+    from moltalk.chemistry import depiction_mol
+    mol, _ = depiction_mol(CUBANE, True)
+    layout(mol)
+    pos = mol.GetConformer().GetPositions()[:, :2]
+    centre = pos[:8].mean(axis=0)
+    for atom in mol.GetAtoms():
+        if atom.GetAtomicNum() == 1:
+            carbon = atom.GetNeighbors()[0].GetIdx()
+            outward = pos[carbon] - centre
+            assert np.dot(pos[atom.GetIdx()] - pos[carbon], outward) >= -1e-6
 
 
 def test_c60_graph_is_intact():
