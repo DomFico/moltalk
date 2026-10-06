@@ -21,7 +21,7 @@ moltalk  (.venv/bin/moltalk → RDKit worker processes with time/memory limits)
 | Install in an isolated venv (`.venv`, Python 3.12, RDKit 2026.03.6, mcp 1.30.0) | **Verified** |
 | Test suite: 106 tests (104 offline by default; 2 live PubChem tests need `MOLTALK_NETWORK_TESTS=1`), including live PubChem and real-browser tests of the drawing, its 3D rotation, zoom, hydrogens and a phone touch screen | **Verified** (`pytest`) |
 | Tools and widget through official MCP clients (Python SDK over stdio/HTTP, MCP Inspector CLI) | **Verified** |
-| UI resource metadata (`ui://widget/molecule-v16.html`, `text/html;profile=mcp-app`, `_meta.ui.resourceUri` + `openai/outputTemplate`) | **Verified** |
+| UI resource metadata (`ui://widget/molecule-v17.html`, `text/html;profile=mcp-app`, `_meta.ui.resourceUri` + `openai/outputTemplate`) | **Verified** |
 | Widget rendering in a sandboxed iframe through the MCP Apps bridge, plus a follow-up `tools/call` from the widget | **Verified** in Chrome with a host harness that imitates ChatGPT (`tests/test_widget_ui.py`, `tests/test_widget_3d.py`) |
 | tunnel-client → stdio server path | **Verified** with tunnel-client's local control plane (`scripts/local-tunnel-test.sh`) |
 | Name resolution: bundled library (22,038 compounds), OPSIN for systematic names, live PubChem fallback | **Verified** (`tests/test_library.py`; PubChem with `MOLTALK_NETWORK_TESTS=1`) |
@@ -119,7 +119,7 @@ The widget's **Hide/Show atom indices** button redraws the structure through a f
 | Start automatically at login (optional) | `systemctl --user enable moltalk-tunnel` |
 | Remove the service | `scripts/uninstall-service.sh`. To also remove the key and profile: `rm -r ~/.config/moltalk` |
 
-After changing tool metadata or the widget: restart (`scripts/start.sh`), then in ChatGPT open the plugin under **Plugins** → **Refresh**, and start a new chat. If you change the widget substantially, bump the version in its URI (`molecule-v16` → `v17`), because ChatGPT caches templates.
+After changing tool metadata or the widget: restart (`scripts/start.sh`), then in ChatGPT open the plugin under **Plugins** → **Refresh**, and start a new chat. If you change the widget substantially, bump the version in its URI (`molecule-v17` → `v18`), because ChatGPT caches templates.
 
 ### If the Tunnel option is unavailable
 
@@ -133,10 +133,11 @@ A public HTTPS endpoint is the documented alternative. ChatGPT accepts only **OA
 | `draw_molecule(smiles, label?, width, height, atom_indices, include_svg)` | **yes** | full analysis + `depicted_stereo_bonds` (each wedge/dash with a plain-language explanation) |
 | `enumerate_stereoisomers(smiles, limit)` | **yes** (grid) | isomers with CIP labels, `achiral` (meso) flag, `enantiomer_index` |
 | `find_substructure(smiles, smarts)` | no | chirality-aware matches (≤100) |
+| `export_structure(smiles, format, coordinates, name, hydrogens)` | yes (download card) | a structure file: `cdxml` (ChemDraw, default), `mol`, `sdf`, `pdb`, `xyz` or `smiles`; 2D (the drawing's layout) or 3D (one conformer, explicit H); warnings when a 3D file fixes unspecified stereo |
 | `conformer_3d(smiles)` | viewer-only | one calculated 3D conformer aligned to the flat drawing, for rotating it (hidden from the model) |
 | `resolve_name(name, allow_network)` | no | structure from the bundled library, OPSIN or (opt-in) PubChem, with source, CID, title, IUPAC name, `stereo_summary` and warnings; ambiguous or unknown names are errors |
 
-**UI component.** `moltalk/widget/molecule.html` is registered as `ui://widget/molecule-v16.html` (`text/html;profile=mcp-app`) with an empty CSP allowlist, so it makes no network requests. It uses the MCP Apps bridge (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`, `ui/notifications/size-changed`) and falls back to `window.openai`. The SVG is sent only in the result's `_meta`, which ChatGPT passes to the widget but not to the model; the chemistry data stays in `structuredContent` for the model. The SVG is sanitized before insertion. Pass `include_svg=true` for clients without UI support.
+**UI component.** `moltalk/widget/molecule.html` is registered as `ui://widget/molecule-v17.html` (`text/html;profile=mcp-app`) with an empty CSP allowlist, so it makes no network requests. It uses the MCP Apps bridge (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`, `ui/notifications/size-changed`) and falls back to `window.openai`. The SVG is sent only in the result's `_meta`, which ChatGPT passes to the widget but not to the model; the chemistry data stays in `structuredContent` for the model. The SVG is sanitized before insertion. Pass `include_svg=true` for clients without UI support.
 
 **Rotate the drawing in 3D.** Grab the flat drawing and drag (one finger on a phone). Over the first ~90 px it lifts off the page into 3D and keeps rotating as a chemical drawing:
 - **Drawing style:** flat colour, implicit carbons, element labels with their hydrogens (OH/HO, NH₂) in RDKit's colours, half-coloured bonds, ring double bonds on the inner side, and gaps where a bond passes in front of another.
@@ -172,6 +173,21 @@ Tested offline on 25 typical course molecules (chains, rings, aromatics, steroid
 OPSIN replaces PubChem only for *name → structure* of systematic names. It cannot *generate* a name for a structure, so structure → IUPAC name still comes from the library or PubChem. A novel structure found in neither is shown with atom indices and no name, rather than a guessed one.
 
 Rebuild the library with `.venv/bin/python scripts/build_library.py` (network, Java and OPSIN; about 10 minutes). RDKit must recompute PubChem's InChIKey from its SMILES, or the entry is dropped; compounds above 150 heavy atoms are also dropped. The current build kept 22,038 entries. Any seed name PubChem cannot find stops the build.
+
+**Stereo labels.** **Stereo: Specified | All | Off** (default Specified) controls only the labels in the drawing; the analysis, the chips and the model's text are unchanged. The setting survives redraws, and switching is instant (RDKit tags its labels `CIP_Code`).
+- **Specified:** R/S and E/Z only where the input fixes the configuration.
+- **All:** also marks stereocentres the input leaves open. In the flat drawing that is **(?)**, because there is no configuration to show. In the rotated view it is **(arb. R)**, the configuration this one conformer happens to have, with the tooltip "Configuration chosen for this displayed conformer; input stereochemistry unspecified". MolTalk does not write R\*/S\*, because in IUPAC usage that means relative configuration.
+- **Off:** no stereo labels.
+
+**Export image.** **SVG** and **PNG** under the drawing save exactly what is on screen: the rotation, zoom, hydrogens, numbers, stereo labels and lone pairs. The image is cropped to the molecule with a small margin and has a transparent background, with dark ink (the drawing is always dark-on-white, whatever the theme). PNG is 3× the on-screen size. In the rotated view, bond-crossing gaps and label backings are painted in the background colour on screen; in the export they become real cut-outs (SVG masks), so nothing shows as white on a coloured slide.
+
+**Structure files.** Ask for a file ("give me a ChemDraw file of that") and the model calls `export_structure`. The result is a card with a **Download** button.
+- **Formats:** CDXML (ChemDraw opens it directly), MOL, SDF, PDB, XYZ and SMILES, all written by RDKit; there is no Open Babel. Binary `.cdx` is refused, because RDKit's Python writer for it is broken; CDXML replaces it.
+- **2D or 3D:** 2D files use the drawing's own layout, with stereo as wedges. 3D files (MOL/SDF with `coordinates="3d"`, PDB, XYZ) use the conformer the viewer rotates, with explicit hydrogens. A 3D file has to fix a configuration at every stereocentre, so when the input leaves some open, the result, the card and the SDF's `MOLTALK_WARNING` field say which ones were chosen arbitrarily.
+- **What is exported:** the structure as given (atom order, charges, stereo), not drawing-only additions such as the Fe–N bonds drawn for heme.
+- **Tested:** every format was round-tripped through RDKit's readers with the stereo intact. The CDXML has not been opened in ChemDraw itself.
+
+**Downloads and privacy.** Both kinds of export use MCP Apps' standard `ui/download-file` when the host advertises `downloadFile` (the host usually asks the user to confirm). Otherwise the widget tries an ordinary browser download, and also opens a small panel: right-click or long-press the image to save it, or copy the file text. That panel works even where the sandbox blocks downloads. The structure never goes into a URL; the file content travels in the tool result (`_meta`, plus a standard embedded resource for hosts without the viewer). Which route ChatGPT and Claude take has to be checked in each app.
 
 **Lone pairs.** **Show lone pairs** draws Lewis-structure dots on the flat and rotated views, instantly, with no server call. The setting survives redraws.
 - **Count:** for each atom, take its valence electrons, subtract its formal charge, subtract one electron per bond (hidden hydrogens included; aromatic rings counted in a Kekulé form), subtract a pair for each dative bond it donates, subtract any unpaired electrons, then halve. Unpaired electrons are drawn as single dots.

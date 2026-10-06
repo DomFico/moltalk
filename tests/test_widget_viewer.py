@@ -47,8 +47,9 @@ def test_viewer_fits_without_scrolling_and_view_survives_toggles():
                 await page.wait_for_timeout(80)
                 f_label = "svg => { const t = [...svg.querySelectorAll('text')].find(t => t.textContent === 'F'); return [+t.getAttribute('x'), +t.getAttribute('y')]; }"
                 before = await frame.locator("svg.lift").evaluate(f_label)
-                for name in ("Show hydrogens", "Off"):
-                    await frame.get_by_role("button", name=name, exact=True).click()
+                numbers = frame.get_by_role("group", name="Atom numbers")
+                for name, scope in (("Show hydrogens", frame), ("Off", numbers)):
+                    await scope.get_by_role("button", name=name, exact=True).click()
                     await page.wait_for_timeout(1200)
                     assert await frame.locator("svg.lift").is_visible(), name
                     after = await frame.locator("svg.lift").evaluate(f_label)
@@ -79,9 +80,9 @@ def test_viewer_fits_without_scrolling_and_view_survives_toggles():
                 assert fit["tools"] < fit["drawing"], fit  # our controls sit above the drawing, never under the chat box
                 assert not await frame.get_by_role("button", name="Enter viewer").is_visible()
                 assert await frame.get_by_role("button", name="Exit viewer").is_visible()
-                assert (await box.bounding_box())["height"] > 300  # the drawing takes the free space
                 if SCREENSHOT_DIR:
                     await page.screenshot(path=os.path.join(SCREENSHOT_DIR, "viewer_phone.png"))
+                assert (await box.bounding_box())["height"] > 280  # the drawing takes the free space (the Stereo selector costs a toolbar row on phones)
 
                 # Back inline: the widget re-reports its height (otherwise the host may collapse it).
                 await page.evaluate("window.lastHeight = 0; document.getElementById('w').style.cssText = 'width:720px;height:900px;border:0'")

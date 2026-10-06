@@ -27,7 +27,7 @@ def stdio_session(test):
 def test_stdio_client():
     async def test(client):
         tools = await client.list_tools()
-        assert len(tools.tools) == 6
+        assert len(tools.tools) == 7
         result = await client.call_tool('analyze_molecule', {'smiles': 'CCO'})
         assert not result.isError
         assert result.structuredContent['formula'] == 'C2H6O'

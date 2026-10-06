@@ -51,7 +51,8 @@ def _stereo_summary(mol, potential) -> dict:
         status = "unspecified"
     else:
         status = "partially specified"
-    summary = {"status": status, "specified": specified, "unspecified": unspecified}
+    summary = {"status": status, "specified": specified, "unspecified": unspecified,
+               "unspecified_atoms": sorted(i for kind, i in real if kind == "atom")}
     if ignored:
         summary["non_stereogenic_ignored"] = ignored  # e.g. adamantane bridgeheads: flipping them changes nothing
     return summary

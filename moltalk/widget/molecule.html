@@ -98,6 +98,21 @@
   :root[data-mode="viewer"] .liftable > svg { width: 100%; height: 100%; }
   :root[data-mode="viewer"] .details, :root[data-mode="viewer"] .enter-viewer { display: none; }
   .exit-viewer { display: none; }
+  .lifthint .export { display: inline-flex; align-items: center; gap: 6px; }
+  .lifthint .export > span { color: var(--muted); }
+  .saveas { position: fixed; left: 12px; right: 12px; bottom: 12px; max-height: 70vh; overflow: auto; z-index: 10;
+            background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+            box-shadow: 0 6px 24px rgba(0, 0, 0, .18); }
+  .saveas header { margin-bottom: 6px; }
+  .saveas header button { margin-left: auto; }
+  .saveas img { display: block; max-width: 100%; max-height: 40vh; margin: 6px auto; background:
+                repeating-conic-gradient(#e8e8ea 0 25%, #ffffff 0 50%) 0 0 / 16px 16px; border-radius: 6px; }
+  .saveas textarea { width: 100%; height: 160px; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .filecard { display: grid; gap: 8px; }
+  .filecard .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .filecard .meta { color: var(--muted); font-size: 12.5px; }
+  .filecard .status { color: var(--muted); font-size: 12.5px; }
+  :root[data-mode="viewer"] .lifthint .export > span { display: none; }
   :root[data-mode="viewer"] .exit-viewer { display: inline-block; }
 </style>
 </head>
@@ -114,6 +129,8 @@
   const conformers = new Map();
   const views = new Map();
   let liftSnapshot = null;
+  let stereoLabels = "specified";  // "specified" | "all" | "off"; survives redraws like the lone-pair setting
+  let hostCaps = {};
   let showLonePairs = false;  // survives redraws (hydrogens, numbering)  // per molecule: rotation, lift, zoom and pan survive redraws (hydrogens, atom numbers)
 
   // ---- MCP Apps bridge (JSON-RPC over postMessage), with window.openai as a fallback ----
@@ -163,6 +180,7 @@
     protocolVersion: "2026-01-26",
   }).then((result) => {
     bridgeReady = true;
+    hostCaps = (result && result.hostCapabilities) || {};
     applyHostContext(result && result.hostContext);
     notify("ui/notifications/initialized", {});
   }).catch(() => {});
@@ -247,6 +265,55 @@
   }
   new ResizeObserver(reportSize).observe(root);
 
+  // ---- Saving files: the MCP Apps host download (ui/download-file) first, then the browser ----
+  // file: { name, mime, text } or { name, mime, base64 }. The host usually confirms with the user; denial is normal.
+  async function saveFile(file, preview) {
+    if (bridgeReady && hostCaps.downloadFile) {
+      const resource = { uri: "file:///" + file.name, mimeType: file.mime };
+      if (file.text != null) resource.text = file.text; else resource.blob = file.base64;
+      try {
+        const result = await rpc("ui/download-file", { contents: [{ type: "resource", resource }] });
+        return result && result.isError ? "cancelled" : "saved";
+      } catch (err) { /* the host refused the request outright: fall back below */ }
+    }
+    // Ordinary download. A sandboxed frame may silently block it, and there is no way to tell, so also offer the
+    // file in a panel the user can always save from (right-click / long-press an image, or copy the text).
+    const blob = file.text != null ? new Blob([file.text], { type: file.mime })
+      : new Blob([Uint8Array.from(atob(file.base64), (c) => c.charCodeAt(0))], { type: file.mime });
+    try {
+      const a = el("a", { href: URL.createObjectURL(blob), download: file.name });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    } catch (err) { /* blocked: the panel below still works */ }
+    showSaveAs(file, preview);
+    return "fallback";
+  }
+
+  function showSaveAs(file, preview) {
+    const old = document.querySelector(".saveas");
+    if (old) old.remove();
+    const close = el("button", { type: "button", "aria-label": "Close" }, "Close");
+    const panel = el("div", { class: "saveas", role: "dialog", "aria-label": "Save " + file.name },
+      el("header", {}, el("strong", {}, file.name), close));
+    if (preview) {
+      panel.append(el("p", { class: "note" }, "If the download did not start, right-click (or long-press) the image and choose Save image."),
+                   el("img", { src: preview, alt: file.name }));
+    } else {
+      const area = el("textarea", { readonly: "", spellcheck: "false" });
+      area.value = file.text != null ? file.text : "";
+      const copy = el("button", { type: "button" }, "Copy");
+      copy.addEventListener("click", async () => {
+        area.select();
+        try { await navigator.clipboard.writeText(area.value); copy.textContent = "Copied"; }
+        catch (err) { copy.textContent = document.execCommand && document.execCommand("copy") ? "Copied" : "Select and copy"; }
+      });
+      panel.append(el("p", { class: "note" }, `If the download did not start, copy the contents and save them as ${file.name}.`), area,
+                   el("div", { class: "actions" }, copy));
+    }
+    close.addEventListener("click", () => panel.remove());
+    document.body.append(panel);
+  }
+
   // ---- Rendering ----
   function el(tag, attrs, ...children) {
     const node = document.createElement(tag);
@@ -305,6 +372,8 @@
       root.append(el("div", { class: "error" }, el("strong", {}, "No structure drawn. "), text));
     } else if (data.kind === "stereoisomers") {
       renderIsomers(data, meta);
+    } else if (data.kind === "file") {
+      renderFile(data, meta, result);
     } else if (data.kind === "molecule" || data.analysis) {
       renderMolecule(data, meta);
     } else {
@@ -328,6 +397,19 @@
       b.addEventListener("click", () => { if (shown !== mode) redraw(b, data, { numbering: mode }); });
       toggle.append(b);
     }
+    // Stereo labels: "Specified" shows R/S (and E/Z) only where the input fixes the configuration; "All" also marks
+    // centres the input leaves open ("?" when flat; in the rotated view, the configuration that conformer happens to
+    // have, labelled "arb."); "Off" hides them. Labels only: the analysis and the model's text are unchanged.
+    const stereoSeg = el("span", { class: "seg", role: "group", "aria-label": "Stereo labels" }, el("span", {}, "Stereo"));
+    const stereoButtons = [];
+    for (const [mode, text, tip] of [["specified", "Specified", "R/S and E/Z where the input specifies them"],
+                                     ["all", "All", "Also mark stereocentres the input leaves unspecified"],
+                                     ["off", "Off", "No stereo labels in the drawing"]]) {
+      const b = el("button", { type: "button", title: tip, "aria-pressed": String(stereoLabels === mode) }, text);
+      b.dataset.mode = mode;
+      stereoButtons.push(b);
+      stereoSeg.append(b);
+    }
     const lpToggle = el("button", { type: "button", "aria-pressed": String(showLonePairs) }, showLonePairs ? "Hide lone pairs" : "Show lone pairs");
     const hasLonePairs = data.lone_pairs && Object.keys(data.lone_pairs).length > 0;
     if (!hasLonePairs) { lpToggle.disabled = true; lpToggle.title = "No lone pairs or unpaired electrons in this structure"; }
@@ -337,7 +419,7 @@
     const liftNotes = el("div", {});
     root.append(
       el("header", {}, el("h1", {}, data.label || "Molecule"), el("span", { class: "formula" }, a.formula || "")),
-      el("div", { class: "toolbar" }, hToggle, lpToggle, toggle),
+      el("div", { class: "toolbar" }, hToggle, lpToggle, toggle, stereoSeg),
       el("div", { class: "ids" },
         el("span", { class: "k" }, "SMILES:"), el("code", { class: "v", title: "Canonical SMILES" }, a.canonical_smiles || ""),
         el("span", { class: "k" }, "IUPAC:"),
@@ -380,8 +462,17 @@
     const flatSvg = safeSvg(meta.svg || data.svg);
     if (!flatSvg) { stage.append(el("div", { class: "canvas" }, el("p", { class: "empty" }, "Drawing unavailable."))); return; }
     flatSvg.setAttribute("aria-label", "2D drawing of " + (data.label || a.canonical_smiles || "molecule"));
-    if (!Array.isArray(meta.atom_px)) { stage.append(el("div", { class: "canvas" }, flatSvg)); return; }
+    if (!Array.isArray(meta.atom_px)) {
+      flatSvg.querySelectorAll(".CIP_Code").forEach((n) => { n.style.display = stereoLabels === "off" ? "none" : ""; });
+      stage.append(el("div", { class: "canvas" }, flatSvg));
+      return;
+    }
     const lift = new Lift(stage, liftNotes, flatSvg, data, meta);
+    for (const b of stereoButtons) b.addEventListener("click", () => {
+      stereoLabels = b.dataset.mode;
+      for (const other of stereoButtons) other.setAttribute("aria-pressed", String(other === b));
+      lift.updateStereoLabels();
+    });
     lpToggle.addEventListener("click", () => {
       showLonePairs = !showLonePairs;
       lpToggle.textContent = showLonePairs ? "Hide lone pairs" : "Show lone pairs";
@@ -476,6 +567,56 @@
     });
   }
 
+  // Geometry of a painted element, for deciding whether an eraser (halo or label backing) touches it.
+  function shapeOf(node) {
+    const num = (k) => +node.getAttribute(k) || 0;
+    if (node.tagName === "line") {
+      return { seg: [num("x1"), num("y1"), num("x2"), num("y2")], r: (+node.getAttribute("stroke-width") || 1) / 2 };
+    }
+    let b;
+    try { b = node.getBBox(); } catch (err) { b = null; }
+    if (!b) return { box: [0, 0, 0, 0] };
+    return { box: [b.x, b.y, b.x + b.width, b.y + b.height] };
+  }
+  function segDistance(p, q) {
+    // Shortest distance between segments p and q (each [x1, y1, x2, y2]).
+    const [ax, ay, bx, by] = p, [cx, cy, dx, dy] = q;
+    const cross = (ox, oy, ux, uy, vx, vy) => (ux - ox) * (vy - oy) - (uy - oy) * (vx - ox);
+    const d1 = cross(ax, ay, bx, by, cx, cy), d2 = cross(ax, ay, bx, by, dx, dy);
+    const d3 = cross(cx, cy, dx, dy, ax, ay), d4 = cross(cx, cy, dx, dy, bx, by);
+    if (((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0))) return 0;
+    const pt = (px, py, x1, y1, x2, y2) => {
+      const vx = x2 - x1, vy = y2 - y1, len = vx * vx + vy * vy;
+      const t = len ? Math.max(0, Math.min(1, ((px - x1) * vx + (py - y1) * vy) / len)) : 0;
+      return Math.hypot(px - x1 - t * vx, py - y1 - t * vy);
+    };
+    return Math.min(pt(ax, ay, cx, cy, dx, dy), pt(bx, by, cx, cy, dx, dy), pt(cx, cy, ax, ay, bx, by), pt(dx, dy, ax, ay, bx, by));
+  }
+  function boxOf(s) {
+    if (s.box) return s.box;
+    const [x1, y1, x2, y2] = s.seg;
+    return [Math.min(x1, x2) - s.r, Math.min(y1, y2) - s.r, Math.max(x1, x2) + s.r, Math.max(y1, y2) + s.r];
+  }
+  function overlaps(a, b) {
+    if (a.seg && b.seg) return segDistance(a.seg, b.seg) < a.r + b.r;
+    const p = boxOf(a), q = boxOf(b);
+    return p[0] < q[2] && q[0] < p[2] && p[1] < q[3] && q[1] < p[3];
+  }
+  // SVG (data URL) -> PNG data URL at `scale` times its size, keeping transparency.
+  function rasterize(svgUrl, width, height, scale) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement("canvas");
+        c.width = Math.max(1, Math.round(width * scale)); c.height = Math.max(1, Math.round(height * scale));
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        try { resolve(c.toDataURL("image/png")); } catch (err) { reject(err); }
+      };
+      img.onerror = () => reject(new Error("could not render the image"));
+      img.src = svgUrl;
+    });
+  }
+
   class Lift {
     constructor(stage, notes, flatSvg, data, meta) {
       this.data = data; this.meta = meta; this.notes = notes;
@@ -492,6 +633,11 @@
       const zoomOut = el("button", { type: "button", "aria-label": "Zoom out" }, "−");
       const zoomIn = el("button", { type: "button", "aria-label": "Zoom in" }, "+");
       const tools = el("span", { class: "tools" }, zoomOut, zoomIn, this.reset);
+      const svgOut = el("button", { type: "button", title: "Save the current view as a vector image (transparent background)" }, "SVG");
+      const pngOut = el("button", { type: "button", title: "Save the current view as a 3× PNG (transparent background)" }, "PNG");
+      svgOut.addEventListener("click", () => this.exportImage("svg", svgOut));
+      pngOut.addEventListener("click", () => this.exportImage("png", pngOut));
+      this.exportStatus = el("span", { class: "export-status", role: "status" });
       if (canRequestFullscreen()) {
         const full = el("button", { type: "button", class: "enter-viewer" }, "Enter viewer");
         full.addEventListener("click", () => requestDisplay("fullscreen"));
@@ -500,7 +646,8 @@
         tools.prepend(full, exit);
       }
       this.status = el("span", {}, TOUCH ? "Drag to rotate · pinch to zoom" : "Drag to rotate · Ctrl+scroll or +/− to zoom · Shift+drag to pan");
-      stage.append(this.box, el("div", { class: "lifthint" }, this.status, tools));
+      stage.append(this.box, el("div", { class: "lifthint" }, this.status,
+        el("span", { class: "export" }, el("span", {}, "Export image"), svgOut, pngOut, this.exportStatus), tools));
       this.R = IDENTITY; this.s = 0; this.travel = 0; this.lifted = false; this.model = null;
       this.zoom = 1; this.panX = 0; this.panY = 0;
       this.reset.addEventListener("click", () => this.resetAll());
@@ -508,6 +655,7 @@
       zoomIn.addEventListener("click", () => this.setZoom((this.targetZoom || this.zoom) * 1.2));
       this.bindInput();
       this.updateLonePairs();
+      this.updateStereoLabels();
       const saved = views.get(data.input_smiles);
       if (saved) {
         this.restoring = saved.lifted;  // don't overwrite the remembered view until it has been restored
@@ -726,6 +874,129 @@
       }
       if (this.lifted) this.paint();  // repaint now, so the toggle feels immediate
     }
+    // Stereo labels on the flat drawing: RDKit's own R/S and E/Z annotations (class CIP_Code) for "Specified", plus a
+    // "(?)" at each stereocentre the input leaves unspecified for "All" (a flat drawing has no configuration there).
+    updateStereoLabels() {
+      this.flatSvg.querySelectorAll(".CIP_Code").forEach((n) => { n.style.display = stereoLabels === "off" ? "none" : ""; });
+      const old = this.flatSvg.querySelector("g.stereo-open");
+      if (old) old.remove();
+      const open = ((this.data.analysis || {}).stereo_summary || {}).unspecified_atoms || [];
+      if (stereoLabels === "all" && open.length) {
+        const px = this.meta.atom_px, bond = this.flatBondPx();
+        const g = svgEl("g", { class: "stereo-open" });
+        for (const i of open) {
+          if (!px[i]) continue;
+          const t = svgEl("text", { x: (px[i][0] + 0.18 * bond).toFixed(1), y: (px[i][1] - 0.22 * bond).toFixed(1),
+            "font-size": Math.max(8, 0.3 * bond).toFixed(1), "font-family": "system-ui, sans-serif", fill: "#555555" });
+          t.textContent = "(?)";
+          const title = svgEl("title", {});
+          title.textContent = "Stereocentre: configuration not specified in the input";
+          t.append(title);
+          g.append(t);
+        }
+        this.flatSvg.append(g);
+      }
+      if (this.lifted) this.paint();
+    }
+    flatBondPx() {
+      const px = this.meta.atom_px, bonds = this.meta.bonds || [];
+      const lengths = bonds.map(([a, b]) => Math.hypot(px[a][0] - px[b][0], px[a][1] - px[b][1])).sort((p, q) => p - q);
+      return lengths.length ? lengths[Math.floor(lengths.length / 2)] : 40;
+    }
+
+    // ---- Image export: exactly what is on screen (rotation, zoom, pan, hydrogens, labels, lone pairs), with a
+    // transparent background. The rotated view cuts gaps with background-coloured strokes (halos) and label
+    // backings; on a transparent image those would show as white marks, so they become real cut-outs (masks).
+    exportSvg() {
+      const live = this.lifted ? this.svg : this.flatSvg;
+      const out = live.cloneNode(true);
+      out.removeAttribute("style"); out.removeAttribute("class"); out.removeAttribute("aria-hidden");
+      out.removeAttribute("role"); out.removeAttribute("aria-label");
+      out.setAttribute("xmlns", SVGNS);
+      if (this.lifted) {
+        const bg = out.firstElementChild;
+        if (bg && bg.tagName === "rect") bg.remove();
+        this.cutErasers(out, live);
+      } else {
+        for (const r of out.querySelectorAll("rect")) {  // RDKit's white page background
+          const style = (r.getAttribute("style") || "") + (r.getAttribute("fill") || "");
+          if (/#fff(fff)?\b/i.test(style) && !+(r.getAttribute("x") || 0) && !+(r.getAttribute("y") || 0)) r.remove();
+        }
+        out.querySelectorAll("[style*='display: none']").forEach((n) => n.remove());
+      }
+      // Crop to the drawing plus a small margin, within what is visible (so a deliberate zoom-in still crops).
+      const [vx, vy, vw, vh] = out.getAttribute("viewBox").split(/\s+/).map(Number);
+      let box = null;
+      for (const node of (this.lifted ? live.querySelector("g") || live : live).children) {
+        if (node.tagName === "rect" && !this.lifted && /#fff/i.test((node.getAttribute("style") || "") + (node.getAttribute("fill") || ""))) continue;
+        if (node.tagName === "defs" || node.tagName === "title" || node.style.display === "none") continue;
+        let b;
+        try { b = node.getBBox(); } catch (err) { continue; }
+        if (!b.width && !b.height) continue;
+        box = box ? [Math.min(box[0], b.x), Math.min(box[1], b.y), Math.max(box[2], b.x + b.width), Math.max(box[3], b.y + b.height)]
+                  : [b.x, b.y, b.x + b.width, b.y + b.height];
+      }
+      let [x0, y0, x1, y1] = [vx, vy, vx + vw, vy + vh];
+      if (box) {
+        const pad = 0.04 * Math.max(box[2] - box[0], box[3] - box[1]) + 6;
+        x0 = Math.max(x0, box[0] - pad); y0 = Math.max(y0, box[1] - pad);
+        x1 = Math.min(x1, box[2] + pad); y1 = Math.min(y1, box[3] + pad);
+      }
+      out.setAttribute("viewBox", `${x0.toFixed(1)} ${y0.toFixed(1)} ${(x1 - x0).toFixed(1)} ${(y1 - y0).toFixed(1)}`);
+      out.setAttribute("width", ((x1 - x0) * this.zoom).toFixed(1));
+      out.setAttribute("height", ((y1 - y0) * this.zoom).toFixed(1));
+      return out;
+    }
+    cutErasers(out, live) {
+      // Pair each element of the copy with the live one (same order) to measure it.
+      const g = out.querySelector("g"), liveG = live.querySelector("g");
+      if (!g || !liveG) return;
+      const kids = [...g.children], liveKids = [...liveG.children];
+      const shapes = liveKids.map((n) => shapeOf(n));
+      const defs = svgEl("defs", {});
+      let content = svgEl("g", {}), drawn = [], masks = 0;
+      kids.forEach((node, k) => {
+        if (node.getAttribute("data-erase") !== "1") { content.append(node); drawn.push(shapes[k]); return; }
+        if (!drawn.some((d) => overlaps(shapes[k], d))) return;  // erases nothing: drop it
+        const id = `cut${masks++}`;
+        const mask = svgEl("mask", { id, maskUnits: "userSpaceOnUse", x: -1e5, y: -1e5, width: 2e5, height: 2e5 });
+        const eraser = node.cloneNode(true);
+        eraser.removeAttribute("data-erase");
+        if (eraser.tagName === "line") eraser.setAttribute("stroke", "#000000"); else eraser.setAttribute("fill", "#000000");
+        mask.append(svgEl("rect", { x: -1e5, y: -1e5, width: 2e5, height: 2e5, fill: "#ffffff" }), eraser);
+        defs.append(mask);
+        const wrapped = svgEl("g", { mask: `url(#${id})` });
+        wrapped.append(...content.childNodes);
+        content = svgEl("g", {});
+        content.append(wrapped);
+      });
+      for (const attr of g.getAttributeNames()) content.setAttribute(attr, g.getAttribute(attr));
+      g.replaceWith(content);
+      if (masks) out.prepend(defs);
+    }
+    async exportImage(kind, button) {
+      const name = (this.data.label || "molecule").replace(/[^A-Za-z0-9._()+,-]+/g, "_").replace(/^[._]+|[._]+$/g, "").slice(0, 60) || "molecule";
+      const svg = this.exportSvg();
+      const text = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(svg);
+      const svgUrl = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(text);
+      button.disabled = true;
+      try {
+        let status;
+        if (kind === "svg") {
+          status = await saveFile({ name: name + ".svg", mime: "image/svg+xml", text }, svgUrl);
+        } else {
+          const png = await rasterize(svgUrl, +svg.getAttribute("width"), +svg.getAttribute("height"), 3);
+          status = await saveFile({ name: name + ".png", mime: "image/png", base64: png.split(",")[1] }, png);
+        }
+        this.exportStatus.textContent = status === "saved" ? "Saved" : status === "cancelled" ? "Cancelled" : "";
+      } catch (err) {
+        this.exportStatus.textContent = "Export failed";
+      } finally {
+        button.disabled = false;
+        setTimeout(() => { this.exportStatus.textContent = ""; }, 4000);
+      }
+    }
+
     flatLabelBox(i, x, y) {
       // RDKit draws each atom label as paths with class "atom-<i>"; their union is the label's exact box.
       let box = null;
@@ -877,9 +1148,12 @@
       };
       const colour = (i) => ELEMENT_COLORS[m.atoms[i].element] || INK;
       const g = svgEl("g", { "stroke-linecap": "round" });
-      const line = (x1, y1, x2, y2, stroke, width, opacity) => g.append(svgEl("line", {
-        x1: x1.toFixed(1), y1: y1.toFixed(1), x2: x2.toFixed(1), y2: y2.toFixed(1),
-        stroke, "stroke-width": width.toFixed(2), "stroke-opacity": opacity.toFixed(2) }));
+      const line = (x1, y1, x2, y2, stroke, width, opacity) => {
+        const node = svgEl("line", { x1: x1.toFixed(1), y1: y1.toFixed(1), x2: x2.toFixed(1), y2: y2.toFixed(1),
+          stroke, "stroke-width": width.toFixed(2), "stroke-opacity": opacity.toFixed(2) });
+        g.append(node);
+        return node;
+      };
       // A bond line coloured half-and-half by its end atoms, as RDKit draws it.
       const halves = (x1, y1, x2, y2, a, b, width, opacity) => {
         const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
@@ -915,7 +1189,7 @@
             const keep = Math.min(0.3 * len, 0.22 * bondPx) + 1;
             const spread = Math.max(...lines.map(([o]) => Math.abs(o)));
             if (len - ta - tb > 2 * keep) line(p.x + ux * (ta + keep), p.y + uy * (ta + keep), q.x - ux * (tb + keep), q.y - uy * (tb + keep),
-                 "#ffffff", 2 * spread + 7, 1);
+                 "#ffffff", 2 * spread + 7, 1).setAttribute("data-erase", "1");
           }
           if (item.bond.dative) {
             // Coordinate bond, donor -> metal: an arrowhead just short of the metal label.
@@ -936,7 +1210,7 @@
             const fill = ELEMENT_COLORS[lab.symbol] || INK;
             const w = 0.62 * fs * lab.symbol.length;
             g.append(svgEl("rect", { x: (p.x - w / 2 - 1).toFixed(1), y: (p.y - 0.6 * fs).toFixed(1),
-              width: (w + 2).toFixed(1), height: (1.2 * fs).toFixed(1), fill: "#ffffff" }));
+              width: (w + 2).toFixed(1), height: (1.2 * fs).toFixed(1), fill: "#ffffff", "data-erase": "1" }));
             const text = (x, anchor, content, size) => {
               const t = svgEl("text", { x: x.toFixed(1), y: p.y.toFixed(1), "text-anchor": anchor, "dominant-baseline": "central",
                 "font-size": size.toFixed(1), "font-family": "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
@@ -953,7 +1227,7 @@
               const hText = [["H"]].concat(lab.h > 1 ? [[String(lab.h), "sub"]] : []);
               const hw = (0.62 * fs * (1 + (lab.h > 1 ? 0.6 : 0))) + 2;
               g.append(svgEl("rect", { x: (lab.hLeft ? p.x - w / 2 - hw : p.x + w / 2).toFixed(1), y: (p.y - 0.6 * fs).toFixed(1),
-                width: hw.toFixed(1), height: (1.2 * fs).toFixed(1), fill: "#ffffff" }));
+                width: hw.toFixed(1), height: (1.2 * fs).toFixed(1), fill: "#ffffff", "data-erase": "1" }));
               text(lab.hLeft ? p.x - w / 2 : p.x + w / 2, lab.hLeft ? "end" : "start", hText, fs);
             }
             if (lab.charge) {
@@ -983,14 +1257,17 @@
           const tags = [];
           if (this.numbering === "iupac" && this.locants[String(i)]) tags.push(this.locants[String(i)]);
           if (this.numbering === "indices" && atom.index != null) tags.push(String(i));
-          if (atom.cip) tags.push(`(${atom.cip}${atom.arbitrary ? "?" : ""})`);
+          // Specified: only configurations the input fixes. All: also the one this conformer happens to have at an
+          // unspecified centre, marked "arb." (not R*/S*, which in IUPAC usage means relative configuration).
+          const showCip = atom.cip && (atom.arbitrary ? stereoLabels === "all" : stereoLabels !== "off");
+          if (showCip) tags.push(atom.arbitrary ? `(arb. ${atom.cip})` : `(${atom.cip})`);
           if (tags.length) {
             const tag = svgEl("text", { x: (p.x + 0.45 * fs).toFixed(1), y: (p.y - 0.55 * fs).toFixed(1),
               "font-size": Math.max(8, 0.55 * fs).toFixed(1), "font-family": "system-ui, sans-serif", fill: "#555555", "fill-opacity": op });
             tag.textContent = tags.join(" ");
-            if (atom.arbitrary) {
+            if (showCip && atom.arbitrary) {
               const title = svgEl("title", {});
-              title.textContent = "Arbitrary: this stereocentre is unspecified in the input";
+              title.textContent = "Configuration chosen for this displayed conformer; input stereochemistry unspecified";
               tag.append(title);
             }
             g.append(tag);
@@ -1018,6 +1295,37 @@
       button.disabled = false;
       button.textContent = "Redraw failed";
     }
+  }
+
+  // A structure file from export_structure: what it is, its caveats, and a Download button. The contents come in the
+  // result's _meta (viewer only) or, from hosts that drop _meta, the standard embedded resource.
+  function renderFile(data, meta, result) {
+    const embedded = (result.content || []).find((c) => c.type === "resource" && c.resource && c.resource.text != null);
+    const text = meta.file_text != null ? meta.file_text : embedded ? embedded.resource.text : null;
+    const coords = data.coordinates === "3d" ? "3D coordinates (one calculated conformer, explicit H)"
+      : data.coordinates === "2d" ? "2D coordinates (the drawing's layout)" : "line notation";
+    const size = data.size_bytes < 1024 ? `${data.size_bytes} bytes` : `${(data.size_bytes / 1024).toFixed(1)} KB`;
+    const status = el("span", { class: "status", role: "status" });
+    const download = el("button", { type: "button" }, `Download ${data.filename}`);
+    const card = el("div", { class: "filecard" },
+      el("header", {}, el("h1", {}, data.filename), el("span", { class: "formula" }, data.format_name || "")),
+      el("p", { class: "meta" }, `${data.label ? data.label + " · " : ""}${coords} · ${size}`),
+      el("div", { class: "ids" }, el("span", { class: "k" }, "SMILES:"), el("code", { class: "v" }, data.canonical_smiles || "")));
+    for (const w of data.warnings || []) card.append(el("p", { class: "note warn-text" }, el("strong", {}, "Stereo caveat. "), w));
+    for (const n of data.notes || []) card.append(el("p", { class: "note" }, n));
+    card.append(el("div", { class: "actions" }, download, status));
+    if (text == null) {
+      download.disabled = true;
+      status.textContent = "The file contents did not reach the viewer; ask for the file again.";
+    }
+    download.addEventListener("click", async () => {
+      download.disabled = true;
+      try {
+        const outcome = await saveFile({ name: data.filename, mime: data.mime_type || "text/plain", text });
+        status.textContent = outcome === "saved" ? "Saved" : outcome === "cancelled" ? "Download cancelled" : "";
+      } finally { download.disabled = false; }
+    });
+    root.append(card);
   }
 
   function renderIsomers(data, meta) {

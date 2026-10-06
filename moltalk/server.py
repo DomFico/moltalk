@@ -5,12 +5,13 @@ import os
 import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from mcp.types import Annotations, CallToolResult, EmbeddedResource, TextContent, TextResourceContents, ToolAnnotations
 from .chemistry import analyze, draw, conformer, substructure, enumerate_stereo
+from .export import export_structure as write_structure, MAX_EMBED_BYTES
 from .limits import runner
 from .naming import name_and_locants, pubchem_slot
 
-WIDGET_URI = "ui://widget/molecule-v16.html"
+WIDGET_URI = "ui://widget/molecule-v17.html"
 WIDGET_MIME = "text/html;profile=mcp-app"
 WIDGET_HTML = files("moltalk").joinpath("widget/molecule.html").read_text(encoding="utf-8")
 
@@ -24,6 +25,7 @@ INSTRUCTIONS = """RDKit chemistry tools. Workflow rules:
 - For follow-up questions about the same molecule, reuse the canonical_smiles from the earlier result instead of re-deriving it.
 - If a tool returns an error, report it; never substitute or invent a different structure.
 - If resolve_name cannot resolve a name (unknown, ambiguous, or stereo not stated), do not write a SMILES for it from memory. Tell the user what the tool said and ask for a structure, a SMILES or a more specific name. Only if the user then asks you to proceed from your own knowledge may you write the SMILES; say plainly that it is unverified by MolTalk.
+- When the user wants a structure file (ChemDraw, MOL, SDF, PDB, XYZ, SMILES), call export_structure with the verified canonical_smiles; default format cdxml for ChemDraw. 2D files use the drawing's layout; 3D files (mol/sdf with coordinates="3d", pdb, xyz) use one calculated conformer. Relay its warnings: a 3D file fixes an arbitrary configuration at any stereocentre the input leaves unspecified. The file is offered to the user by the inline viewer's Download button; do not paste the file contents unless asked.
 - When you pass label= to draw_molecule, use the compound's name only if the SMILES came from resolve_name for that name (or the user gave it). draw_molecule checks the label against MolTalk's library: if label_check.status is "mismatch", the drawing is NOT that compound; say so and do not present it under that name."""
 
 HOST = os.getenv("HOST", "127.0.0.1")
@@ -147,6 +149,23 @@ def _check_label(label: str | None, inchikey: str) -> dict | None:
 async def conformer_3d(smiles: str, hydrogens: bool = False) -> dict[str, Any]:
     """Viewer-only: one calculated 3D conformer aligned to the flat drawing, used to rotate the drawing in 3D."""
     return await runner.run(conformer, smiles, hydrogens)
+
+@mcp.tool(annotations=READ_ONLY, meta=_ui_meta("Preparing structure file…", "Structure file ready"))
+async def export_structure(smiles: str, format: str = "cdxml", coordinates: str | None = None, name: str | None = None,
+                           hydrogens: bool = False) -> CallToolResult:
+    """Write the structure as a file the user can download: format "cdxml" (ChemDraw, default), "mol", "sdf", "pdb", "xyz" or "smiles". coordinates: "2d" (the drawing's layout; default for cdxml/mol/sdf) or "3d" (one calculated conformer with explicit hydrogens; required for pdb/xyz). name: compound name for the file name and title. hydrogens=true adds explicit hydrogens to a 2D file. The file holds the structure as given (charges, stereo, atom order), not drawing-only additions. Shown inline with a Download button."""
+    result = await runner.run(write_structure, smiles, format, coordinates, name, hydrogens)
+    text = result.pop("text")
+    content = [TextContent(type="text", text=(
+        f"Prepared {result['filename']} ({result['format_name']}, {result['coordinates']} coordinates, "
+        f"{result['size_bytes']} bytes) for {result['canonical_smiles']}. The user can download it from the viewer. "
+        + " ".join(result["warnings"] + result["notes"])).strip())]
+    if result["size_bytes"] <= MAX_EMBED_BYTES:
+        # The standard MCP way to return a file, for hosts without the viewer.
+        content.append(EmbeddedResource(type="resource", annotations=Annotations(audience=["user"]),
+                                        resource=TextResourceContents(uri=f"file:///{result['filename']}",
+                                                                      mimeType=result["mime_type"], text=text)))
+    return CallToolResult(content=content, structuredContent=result, _meta={"file_text": text})
 
 @mcp.tool(annotations=READ_ONLY)
 async def find_substructure(smiles: str, smarts: str) -> dict[str, Any]:

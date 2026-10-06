@@ -131,10 +131,14 @@ def test_lift_flat_drawing_into_3d():
                 await show({"smiles": "CCCC", "label": "butane"})
                 assert await frame.get_by_role("button", name="Show lone pairs").is_disabled()
 
-                # Unspecified stereo is marked as arbitrary.
+                # Unspecified stereo: not labelled by default; under Stereo "All" it is marked as arbitrary.
                 await show({"smiles": "CC(O)C(=O)O", "label": "lactic acid"})
                 await drag(120, 0)
-                assert any("?)" in t for t in await lift.evaluate("svg => [...svg.querySelectorAll('text')].map(t => t.textContent)"))
+                texts = "svg => [...svg.querySelectorAll('text')].map(t => t.textContent)"
+                assert not any("arb." in t for t in await lift.evaluate(texts))
+                await frame.get_by_role("group", name="Stereo labels").get_by_role("button", name="All").click()
+                assert any("(arb. " in t for t in await lift.evaluate(texts))
+                await frame.get_by_role("group", name="Stereo labels").get_by_role("button", name="Specified").click()
                 await frame.get_by_text("Model caveat.").wait_for()
 
                 # Zoom: +/− act on the flat drawing too; Reset restores the view.
