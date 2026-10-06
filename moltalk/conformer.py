@@ -195,6 +195,14 @@ def _extend_chains(mol, conf_id, min_chain=4):
     return out
 
 
+def _optional(step, *args):
+    """Run a cosmetic refinement; if RDKit fails on an unusual structure, skip it rather than lose the 3D view."""
+    try:
+        return step(*args)
+    except Exception:  # noqa: BLE001 - any failure here only means the unrefined model is used
+        return None
+
+
 def _swing_tail(mol, conf_id, score, heavy_count, max_bonds=4, min_tail=6):
     """A long chain hanging off a ring system (chlorophyll's phytyl ester) can leave the ring pointing back across
     it. Scan the first few torsions of its attachment (60/180/300°, staggered), keep the clash-free combination that
@@ -209,6 +217,8 @@ def _swing_tail(mol, conf_id, score, heavy_count, max_bonds=4, min_tail=6):
     reach = {i: min(dist[i][r] for r in ring_atoms) for i in range(heavy_count)}
     reach = {i: d for i, d in reach.items() if d < mol.GetNumAtoms()}  # a separate metal ion is not connected
     far = max(reach, key=reach.get)
+    if reach[far] < min_tail:
+        return None  # no long chain: nothing to swing (and far may be a ring atom itself)
     start = min(ring_atoms, key=lambda r: dist[far][r])
     path = list(Chem.GetShortestPath(mol, start, far))
     if len(path) - 1 < min_tail:
@@ -518,18 +528,18 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     # Long open chains (chlorophyll's phytyl, fatty acids) come out of ETKDG crumpled, often folded back over the
     # rest of the molecule. Straighten them to the extended zigzag, the textbook and low-energy shape that the flat
     # drawing also shows, and keep it only if it matches the drawing better.
-    straightened = _extend_chains(mol, best[1])
+    straightened = _optional(_extend_chains, mol, best[1])
     if straightened is not None:
         candidate = evaluate(straightened, best[1])
         if candidate[0][0] <= best[0][0] and candidate[0][2] < best[0][2]:
             best, mol = candidate, straightened
-    unfolded = _swing_tail(mol, best[1], lambda m: evaluate(m, best[1]), heavy_count)
+    unfolded = _optional(_swing_tail, mol, best[1], lambda m: evaluate(m, best[1]), heavy_count)
     if unfolded is not None:
         candidate = evaluate(unfolded, best[1])
         if candidate[0][0] <= best[0][0] and candidate[0][2] < best[0][2]:
             best, mol = candidate, unfolded
     # Last, so no later unrestrained minimisation undoes it; only the chosen conformer, as it costs a minimisation.
-    if site and _square_cavity(mol, site, drawn_heavy, best[1]):
+    if site and _optional(_square_cavity, mol, site, drawn_heavy, best[1]):
         best = evaluate(mol, best[1])
         method += ", N4 cavity fitted to the metal"
     (contradicted, _, rmsd), conf_id, xyz, raw, heavy_rot, heavy_scale, vsepr_lone = best
