@@ -78,3 +78,20 @@ def test_large_macrolide_gets_a_3d_model_quickly():
     model = conformer(ERYTHROMYCIN)
     assert time.monotonic() - start < 10
     assert sum("cip" in a for a in model["atoms"]) == 18
+
+
+def test_small_molecules_lift_without_a_jump():
+    # 8 random conformers of 2-bromobutane had no anti chain; the methyl then swung ~2 bond lengths on lifting.
+    from moltalk.chemistry import conformer
+    assert conformer("CCC(C)Br", False)["fit_rmsd"] < 0.2
+
+
+def test_falls_back_to_one_conformer_on_a_slow_cpu(monkeypatch):
+    # On Cloud Run, embedding 8 conformers of F430 ran out of time and 3D failed; one conformer still works.
+    from rdkit.Chem import AllChem
+    from moltalk import conformer as cf
+    from moltalk.chemistry import conformer
+    real = AllChem.EmbedMultipleConfs
+    monkeypatch.setattr(cf.AllChem, "EmbedMultipleConfs", lambda mol, n, params: real(mol, n, params) if n == 1 else [])
+    model = conformer("CC(=O)Oc1ccccc1C(=O)O", False)
+    assert len(model["atoms"]) == 13

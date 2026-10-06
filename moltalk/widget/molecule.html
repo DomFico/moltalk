@@ -68,9 +68,12 @@
   .liftable > svg { display: block; width: 100%; height: auto; }
   .liftable.fitted > svg { height: 100%; }  /* height set by fitInline(); the drawing letterboxes inside */
   .liftable > svg.lift { position: absolute; inset: 0; height: 100%; }
-  .lifthint { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; color: var(--muted); font-size: 12px; }
-  .lifthint .tools { margin-left: auto; display: flex; gap: 6px; }
+  /* One row: the hint takes what is left, and every button sits together, flush right, never split across lines. */
+  .lifthint { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 6px; color: var(--muted); font-size: 12px; }
+  .lifthint > .hint { flex: 1 1 220px; min-width: 0; }
+  .lifthint .tools { margin-left: auto; display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; white-space: nowrap; }
   .lifthint .tools button { min-width: 34px; }
+  .lifthint .tools .label { color: var(--muted); }
   /* Viewer (fullscreen) mode: everything fits the window; nothing scrolls. Insets keep clear of the host's title bar. */
   :root[data-mode="viewer"], :root[data-mode="viewer"] body { height: 100%; overflow: hidden; }
   /* ChatGPT draws its own bars over the viewer: a title bar at the top on phones and the "Ask ChatGPT" box at the
@@ -98,8 +101,6 @@
   :root[data-mode="viewer"] .liftable > svg { width: 100%; height: 100%; }
   :root[data-mode="viewer"] .details, :root[data-mode="viewer"] .enter-viewer { display: none; }
   .exit-viewer { display: none; }
-  .lifthint .export { display: inline-flex; align-items: center; gap: 6px; }
-  .lifthint .export > span { color: var(--muted); }
   .saveas { position: fixed; left: 12px; right: 12px; bottom: 12px; max-height: 70vh; overflow: auto; z-index: 10;
             background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
             box-shadow: 0 6px 24px rgba(0, 0, 0, .18); }
@@ -112,7 +113,7 @@
   .filecard .actions { display: flex; flex-wrap: wrap; gap: 8px; }
   .filecard .meta { color: var(--muted); font-size: 12.5px; }
   .filecard .status { color: var(--muted); font-size: 12.5px; }
-  :root[data-mode="viewer"] .lifthint .export > span { display: none; }
+  :root[data-mode="viewer"] .lifthint .tools .label { display: none; }
   :root[data-mode="viewer"] .exit-viewer { display: inline-block; }
 </style>
 </head>
@@ -510,6 +511,7 @@
   const TOUCH = (typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches) || navigator.maxTouchPoints > 0
     || /iPhone|iPad|iPod|Android|Mobile/i.test(navigator.userAgent || "") || hostDevice.type === "mobile" || hostDevice.type === "tablet";
   if (TOUCH) document.documentElement.dataset.touch = "1";
+  const TOUCH_HINT = "Drag to rotate · pinch to zoom · two fingers to pan";
   function canRequestFullscreen() {
     return !!(window.openai && typeof window.openai.requestDisplayMode === "function") || bridgeReady;
   }
@@ -602,6 +604,13 @@
     const p = boxOf(a), q = boxOf(b);
     return p[0] < q[2] && q[0] < p[2] && p[1] < q[3] && q[1] < p[3];
   }
+  // Briefly show an outcome on the button itself, so the row never grows.
+  function flash(button, text) {
+    const label = button.dataset.label || button.textContent;
+    button.dataset.label = label;
+    button.textContent = text;
+    setTimeout(() => { button.textContent = label; }, 2000);
+  }
   // SVG (data URL) -> PNG data URL at `scale` times its size, keeping transparency.
   function rasterize(svgUrl, width, height, scale) {
     return new Promise((resolve, reject) => {
@@ -629,30 +638,25 @@
       this.box = el("div", { class: "canvas liftable", tabindex: "0", role: "img",
         "aria-label": "Molecule drawing. Drag, or use the arrow keys, to rotate it in 3D; Escape returns it to flat." });
       this.box.append(flatSvg, this.svg);
-      this.reset = el("button", { type: "button", disabled: "" }, "Reset");
-      const zoomOut = el("button", { type: "button", "aria-label": "Zoom out" }, "−");
-      const zoomIn = el("button", { type: "button", "aria-label": "Zoom in" }, "+");
-      const tools = el("span", { class: "tools" }, zoomOut, zoomIn, this.reset);
+      // Zoom and pan are by gesture (Ctrl+scroll, pinch, Shift+drag, +/- keys); "2D" returns to the flat drawing.
+      this.reset = el("button", { type: "button", disabled: "", title: "Back to the flat 2D drawing (Esc)" }, "2D");
       const svgOut = el("button", { type: "button", title: "Save the current view as a vector image (transparent background)" }, "SVG");
       const pngOut = el("button", { type: "button", title: "Save the current view as a 3× PNG (transparent background)" }, "PNG");
       svgOut.addEventListener("click", () => this.exportImage("svg", svgOut));
       pngOut.addEventListener("click", () => this.exportImage("png", pngOut));
-      this.exportStatus = el("span", { class: "export-status", role: "status" });
+      const tools = el("span", { class: "tools" }, el("span", { class: "label" }, "Export"), svgOut, pngOut, this.reset);
       if (canRequestFullscreen()) {
         const full = el("button", { type: "button", class: "enter-viewer" }, "Enter viewer");
         full.addEventListener("click", () => requestDisplay("fullscreen"));
         const exit = el("button", { type: "button", class: "exit-viewer" }, "Exit viewer");
         exit.addEventListener("click", () => requestDisplay("inline"));
-        tools.prepend(full, exit);
+        this.reset.before(full, exit);
       }
-      this.status = el("span", {}, TOUCH ? "Drag to rotate · pinch to zoom" : "Drag to rotate · Ctrl+scroll or +/− to zoom · Shift+drag to pan");
-      stage.append(this.box, el("div", { class: "lifthint" }, this.status,
-        el("span", { class: "export" }, el("span", {}, "Export image"), svgOut, pngOut, this.exportStatus), tools));
+      this.status = el("span", { class: "hint" }, TOUCH ? TOUCH_HINT : "Drag to rotate · Ctrl+scroll to zoom · Shift+drag to pan");
+      stage.append(this.box, el("div", { class: "lifthint" }, this.status, tools));
       this.R = IDENTITY; this.s = 0; this.travel = 0; this.lifted = false; this.model = null;
       this.zoom = 1; this.panX = 0; this.panY = 0;
       this.reset.addEventListener("click", () => this.resetAll());
-      zoomOut.addEventListener("click", () => this.setZoom((this.targetZoom || this.zoom) / 1.2));
-      zoomIn.addEventListener("click", () => this.setZoom((this.targetZoom || this.zoom) * 1.2));
       this.bindInput();
       this.updateLonePairs();
       this.updateStereoLabels();
@@ -733,14 +737,16 @@
       heavy.forEach((a) => { for (let j = 0; j < 3; j++) c[j] += a.xyz[j] / heavy.length; });
       this.centre = c;
       // Once lifted, the structure is centred and, if its 3D extent needs it, shrunk to fit the canvas.
+      const lengths = model.bonds.map((b) => Math.hypot(px[b.a][0] - px[b.b][0], px[b.a][1] - px[b.b][1])).sort((p, q) => p - q);
       let r3 = 0;
       heavy.forEach((a) => { r3 = Math.max(r3, Math.hypot(a.xyz[0] - c[0], a.xyz[1] - c[1], a.xyz[2] - c[2])); });
-      // Shrinking for the worst-case orientation makes the drawing jump away; go only partway (sqrt) and
-      // accept slight clipping at extreme angles.
+      // Shrink so the whole model (plus room for an atom label) stays inside the canvas in every orientation. A
+      // small molecule's flat drawing fills the canvas, so a longer 3D bond (C–Br) would otherwise leave the frame.
+      // The shrink is applied gradually as the drawing lifts, so it reads as part of the motion, not a jump.
       const room = 0.5 * Math.min(this.W, this.H) - 8;
-      this.fit = Math.sqrt(Math.min(1, room / Math.max(1e-6, k * r3)));
+      const label = Math.max(9, Math.min(30, 0.42 * (lengths.length ? lengths[Math.floor(lengths.length / 2)] : 40)));
+      this.fit = Math.min(1, (room - 0.6 * label) / Math.max(1e-6, k * r3));
       this.flat = atoms.map((_, i) => px[i]);
-      const lengths = model.bonds.map((b) => Math.hypot(px[b.a][0] - px[b.b][0], px[b.a][1] - px[b.b][1])).sort((p, q) => p - q);
       // No bonds (an ion such as hydroxide or chloride): size the label from RDKit's own label instead.
       this.bondPx = lengths.length ? lengths[Math.floor(lengths.length / 2)]
         : this.flatLabelBox(0, px[0][0], px[0][1]).h / 0.42;
@@ -758,7 +764,7 @@
       for (const type of ["touchstart", "touchmove"]) this.box.addEventListener(type, (e) => e.preventDefault(), { passive: false });
       this.box.addEventListener("pointerdown", (e) => {
         if (e.pointerType === "mouse" && e.button !== 0) return;
-        if (e.pointerType === "touch") this.status.textContent = "Drag to rotate · pinch to zoom";
+        if (e.pointerType === "touch") this.status.textContent = TOUCH_HINT;
         this.ensureModel();
         this.box.setPointerCapture(e.pointerId);
         pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -874,34 +880,28 @@
       }
       if (this.lifted) this.paint();  // repaint now, so the toggle feels immediate
     }
-    // Stereo labels on the flat drawing: RDKit's own R/S and E/Z annotations (class CIP_Code) for "Specified", plus a
-    // "(?)" at each stereocentre the input leaves unspecified for "All" (a flat drawing has no configuration there).
+    // Stereo labels on the flat drawing are RDKit's own annotations (class CIP_Code): R/S and E/Z where the input
+    // specifies them, and "(?)" at stereocentres it leaves open. Each glyph is attributed to its nearest atom, so
+    // "Specified" can hide just the "(?)" ones; "All" shows both; "Off" hides every stereo label.
     updateStereoLabels() {
-      this.flatSvg.querySelectorAll(".CIP_Code").forEach((n) => { n.style.display = stereoLabels === "off" ? "none" : ""; });
-      const old = this.flatSvg.querySelector("g.stereo-open");
-      if (old) old.remove();
-      const open = ((this.data.analysis || {}).stereo_summary || {}).unspecified_atoms || [];
-      if (stereoLabels === "all" && open.length) {
-        const px = this.meta.atom_px, bond = this.flatBondPx();
-        const g = svgEl("g", { class: "stereo-open" });
-        for (const i of open) {
-          if (!px[i]) continue;
-          const t = svgEl("text", { x: (px[i][0] + 0.18 * bond).toFixed(1), y: (px[i][1] - 0.22 * bond).toFixed(1),
-            "font-size": Math.max(8, 0.3 * bond).toFixed(1), "font-family": "system-ui, sans-serif", fill: "#555555" });
-          t.textContent = "(?)";
-          const title = svgEl("title", {});
-          title.textContent = "Stereocentre: configuration not specified in the input";
-          t.append(title);
-          g.append(t);
-        }
-        this.flatSvg.append(g);
+      if (!this.cipGlyphs) {
+        const px = this.meta.atom_px;
+        const open = new Set(((this.data.analysis || {}).stereo_summary || {}).unspecified_atoms || []);
+        this.cipGlyphs = [...this.flatSvg.querySelectorAll(".CIP_Code")].map((node) => {
+          let nearest = -1;
+          try {
+            const b = node.getBBox(), cx = b.x + b.width / 2, cy = b.y + b.height / 2;
+            let best = Infinity;
+            px.forEach(([x, y], i) => { const d = Math.hypot(x - cx, y - cy); if (d < best) { best = d; nearest = i; } });
+          } catch (err) { /* not measurable: treat as a specified label */ }
+          return { node, open: open.has(nearest) };
+        });
+      }
+      for (const { node, open } of this.cipGlyphs) {
+        const show = stereoLabels === "all" || (stereoLabels === "specified" && !open);
+        node.style.display = show ? "" : "none";
       }
       if (this.lifted) this.paint();
-    }
-    flatBondPx() {
-      const px = this.meta.atom_px, bonds = this.meta.bonds || [];
-      const lengths = bonds.map(([a, b]) => Math.hypot(px[a][0] - px[b][0], px[a][1] - px[b][1])).sort((p, q) => p - q);
-      return lengths.length ? lengths[Math.floor(lengths.length / 2)] : 40;
     }
 
     // ---- Image export: exactly what is on screen (rotation, zoom, pan, hydrogens, labels, lone pairs), with a
@@ -988,12 +988,11 @@
           const png = await rasterize(svgUrl, +svg.getAttribute("width"), +svg.getAttribute("height"), 3);
           status = await saveFile({ name: name + ".png", mime: "image/png", base64: png.split(",")[1] }, png);
         }
-        this.exportStatus.textContent = status === "saved" ? "Saved" : status === "cancelled" ? "Cancelled" : "";
+        if (status === "saved" || status === "cancelled") flash(button, status === "saved" ? "Saved" : "Cancelled");
       } catch (err) {
-        this.exportStatus.textContent = "Export failed";
+        flash(button, "Failed");
       } finally {
         button.disabled = false;
-        setTimeout(() => { this.exportStatus.textContent = ""; }, 4000);
       }
     }
 

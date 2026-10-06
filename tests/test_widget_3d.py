@@ -80,7 +80,7 @@ def test_lift_flat_drawing_into_3d():
                 assert await frame.get_by_text("Rotated view.").is_visible()
 
                 # Reset animates back and restores the exact RDKit drawing.
-                await frame.get_by_role("button", name="Reset", exact=True).click()
+                await frame.get_by_role("button", name="2D", exact=True).click()
                 await lift.wait_for(state="hidden")
                 assert await frame.locator(".liftable > svg:not(.lift)").evaluate("s => s.style.visibility") == "visible"
 
@@ -96,6 +96,7 @@ def test_lift_flat_drawing_into_3d():
                 # Aspirin: hydrogens in labels and ring double bonds drawn on the inner side.
                 await show({"smiles": "CC(=O)Oc1ccccc1C(=O)O", "label": "aspirin"})
                 await drag(30, 10, steps=4)
+                await lift.locator("text").first.wait_for()  # a drag before the 3D data arrives is applied when it does
                 texts = await lift.evaluate("svg => [...svg.querySelectorAll('text')].map(t => t.textContent)")
                 assert "H" in texts and texts.count("O") == 4
                 await shot("lift_2_aspirin_partial.png")
@@ -141,16 +142,17 @@ def test_lift_flat_drawing_into_3d():
                 await frame.get_by_role("group", name="Stereo labels").get_by_role("button", name="Specified").click()
                 await frame.get_by_text("Model caveat.").wait_for()
 
-                # Zoom: +/− act on the flat drawing too; Reset restores the view.
+                # Zoom: the + key acts on the flat drawing too; "2D" restores the view.
                 flat_svg = frame.locator(".liftable > svg:not(.lift)")
                 await show({"smiles": "CC(=O)Oc1ccccc1C(=O)O", "label": "aspirin"})
-                await frame.get_by_role("button", name="Zoom in").click()
+                await box.focus()
+                await box.press("+")
                 await page.wait_for_timeout(60)
                 mid = float((await flat_svg.get_attribute("viewBox")).split()[2])
                 await page.wait_for_timeout(500)
                 end = float((await flat_svg.get_attribute("viewBox")).split()[2])
                 assert end < mid <= 640 and abs(end - 640 / 1.2) < 2  # glides smoothly to a gentle 1.2x
-                await frame.get_by_role("button", name="Reset", exact=True).click()
+                await frame.get_by_role("button", name="2D", exact=True).click()
                 await page.wait_for_timeout(350)
                 assert await flat_svg.get_attribute("viewBox") == "0 0 640 420"
 

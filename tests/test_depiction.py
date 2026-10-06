@@ -34,3 +34,14 @@ def test_ordinary_molecules_keep_rdkit_layout(smiles):
     mol = Chem.MolFromSmiles(smiles)
     result = layout(mol)
     assert result["method"] == "rdkit" and result["bond_crossings"] == 0
+
+
+def test_hydroporphyrins_get_the_textbook_square():
+    # F430 and chlorophyll have rings fused to the macrocycle that defeat RDKit's porphyrin template (the ring folded
+    # inward and the metal bonds stretched to 2.6x); the core is now pinned to the porphine square.
+    from moltalk import library
+    from moltalk.chemistry import draw
+    for name in ("cofactor F430", "chlorophyll a"):
+        depiction = draw(library.find_name(name)[1]["smiles"], 640, 420, False)["depiction"]
+        assert depiction["bond_crossings"] == 0 and depiction["overlapping_atoms"] == 0, name
+        assert depiction["max_bond_length_ratio"] <= 1.6, (name, depiction)

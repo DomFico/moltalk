@@ -17,6 +17,10 @@ from .depiction import _chelated_metal
 
 EMBED_TIMEOUT_S = 5
 CANDIDATE_CONFORMERS = (8, 32)  # try more only if no conformer agrees with the flat wedges
+SINGLE_TIMEOUT_S = 10  # last resort: one conformer, when several could not be made in time (big chelates on a slow CPU)
+FIT_RETRY_MAX_ATOMS = 30
+LARGE_ATOMS = 50
+GOOD_FIT = 0.15  # weighted RMSD (bond-length units) below which a conformer already lifts smoothly from the drawing
 RETRY_BUDGET_S = 1.5  # ...and only if the first round was quick
 
 
@@ -101,12 +105,19 @@ def _embed(heavy, conformers=8):
         params.randomSeed = 0xC0FFEE
         params.timeout = EMBED_TIMEOUT_S
         status = -1
-        for random_coords in (False, True):
+        # Several conformers, so the one that best matches the flat drawing can be chosen; then random starting
+        # coordinates; then, as a last resort, a single conformer with a longer budget. On timeout RDKit returns [-1]
+        # and no conformers, so count the conformers actually made. A first attempt that ran out of time means the
+        # second would too (Cloud Run's CPU is several times slower than a desktop), so go straight to the last.
+        started = time.monotonic()
+        for count, random_coords, timeout in ((conformers, False, EMBED_TIMEOUT_S), (conformers, True, EMBED_TIMEOUT_S),
+                                              (1, True, SINGLE_TIMEOUT_S)):
+            if count > 1 and random_coords and time.monotonic() - started > 0.5 * EMBED_TIMEOUT_S:
+                continue
             params.useRandomCoords = random_coords
+            params.timeout = timeout
             try:
-                # Several conformers, so the one that best matches the flat drawing can be chosen. On timeout RDKit
-                # returns [-1] and no conformers, so count the conformers actually made.
-                AllChem.EmbedMultipleConfs(mol, conformers, params)
+                AllChem.EmbedMultipleConfs(mol, count, params)
                 status = 0 if mol.GetNumConformers() else -1
             except RuntimeError:
                 status = -1
@@ -320,6 +331,8 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     best = mol = method = None
     started = time.monotonic()
     for count in CANDIDATE_CONFORMERS:
+        if heavy_count > LARGE_ATOMS:
+            count = max(1, count // 2)  # chlorophyll: embedding and optimising 8 conformers took 7 s on a desktop
         if best is not None and time.monotonic() - started > RETRY_BUDGET_S:
             break  # a big, slow molecule (erythromycin): more conformers would mostly time out
         try:
@@ -344,7 +357,12 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
             if best is None or key < best[0]:
                 best = (key, conf.GetId(), aligned, pos, rot, transform.scale, vsepr_lone)
                 mol, method = candidate_mol, candidate_method
-        if best[0][0] == 0 or candidate_mol.GetNumConformers() == 1:
+        # Stop when the wedges agree and the shape matches the drawing. A poor fit means the random conformers missed
+        # the drawing's shape (8 conformers of 2-bromobutane had no anti chain, so lifting swung the methyl ~2 bond
+        # lengths, which looks like a jump); more conformers fix that, within the time budget above.
+        # Only small molecules retry for shape: there one misplaced atom is a large part of the picture, while big,
+        # flexible ones (heme's side chains) never fit a flat drawing closely and would just take longer.
+        if candidate_mol.GetNumConformers() == 1 or (best[0][0] == 0 and (best[0][2] <= GOOD_FIT or heavy_count > FIT_RETRY_MAX_ATOMS)):
             break
     (contradicted, _, rmsd), conf_id, xyz, raw, heavy_rot, heavy_scale, vsepr_lone = best
     frame_rot = heavy_rot

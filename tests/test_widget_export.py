@@ -61,13 +61,14 @@ def test_stereo_labels_and_exports():
                 box = frame.locator(".liftable")
                 await box.wait_for()
                 stereo = frame.get_by_role("group", name="Stereo labels")
-                cip = frame.locator(".liftable > svg:not(.lift) .CIP_Code").first
-                assert await cip.is_visible()
-                assert await frame.locator("g.stereo-open").count() == 0
+                visible = """() => [...document.querySelectorAll('.liftable > svg:not(.lift) .CIP_Code')]
+                                 .filter(n => n.style.display !== 'none').length"""
+                inner = page.frames[1]
+                assert await inner.evaluate(visible) == 3  # "(S)" only; the open centre's "(?)" is hidden
                 await stereo.get_by_role("button", name="All").click()
-                assert await frame.locator("g.stereo-open text").count() == 1
+                assert await inner.evaluate(visible) == 6  # plus "(?)", placed by RDKit like any stereo label
                 await stereo.get_by_role("button", name="Off").click()
-                assert not await cip.is_visible() and await frame.locator("g.stereo-open").count() == 0
+                assert await inner.evaluate(visible) == 0
 
                 # Rotated view: "(S)" is shown for Specified; the open centre only under All, as "arb.".
                 await stereo.get_by_role("button", name="Specified").click()

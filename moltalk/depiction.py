@@ -6,6 +6,9 @@ the graph is planar. Such layouts are scored, and a Tutte (barycentric)
 embedding of the ring core is tried instead. For a 3-connected planar core,
 Tutte's theorem guarantees a crossing-free drawing: a Schlegel diagram.
 """
+import re
+from functools import lru_cache
+
 import numpy as np
 from rdkit import Chem, rdBase
 from rdkit.Chem import rdDepictor
@@ -138,6 +141,121 @@ def _turn_substituents_down(mol, donors):
         conf.SetAtomPosition(i, Point3D(*(rot @ (p - centre) + centre)))
 
 
+@lru_cache(maxsize=1)
+def _porphyrinoid_core():
+    """(query, coordinates): the porphine skeleton (four N-rings joined by four one-carbon bridges) as a pattern that
+    ignores bond orders, aromaticity and hydrogens, with its textbook square layout from RDKit's ring templates.
+    Hydroporphyrins such as coenzyme F430 match it, though their extra fused rings defeat RDKit's own template."""
+    porphine = Chem.MolFromSmiles("c1cc2cc3ccc(cc4ccc(cc5ccc(cc1n2)[nH]5)n4)[nH]3")
+    rdDepictor.Compute2DCoords(porphine, useRingTemplates=True)
+    query = Chem.MolFromSmarts(re.sub(r"[:=\-]", "~", Chem.MolToSmarts(porphine)).replace("&H1", ""))
+    match = porphine.GetSubstructMatch(query)
+    conf = porphine.GetConformer()
+    return query, np.array([[conf.GetAtomPosition(i).x, conf.GetAtomPosition(i).y] for i in match])
+
+
+def _shape_rmsd(a, b) -> float:
+    """RMSD after the best similarity transform (translation, rotation or reflection, uniform scale) of a onto b."""
+    a, b = a - a.mean(axis=0), b - b.mean(axis=0)
+    u, sv, vt = np.linalg.svd(a.T @ b)
+    scale = sv.sum() / max(1e-9, (a ** 2).sum())
+    return float(np.sqrt(((scale * a @ u @ vt - b) ** 2).sum(axis=1).mean()))
+
+
+def _pin_porphyrinoid(ligand) -> bool:
+    """If the ligand has a porphyrin-type core that RDKit laid out badly (its fused rings folded inward), lay it out
+    again with the core pinned to the textbook porphine square; RDKit then places fused rings and side chains."""
+    query, template = _porphyrinoid_core()
+    match = ligand.GetSubstructMatch(query)
+    if not match:
+        return False
+    conf = ligand.GetConformer()
+    current = np.array([[conf.GetAtomPosition(i).x, conf.GetAtomPosition(i).y] for i in match])
+    if _shape_rmsd(current, template) < 0.25:  # already the textbook square (heme, chlorophyll)
+        return False
+    coords = {a: template[k] for k, a in enumerate(match)}
+    # A ring fused to the core (F430's lactam along one bond; chlorophyll's ring E along ring C and a bridge carbon)
+    # is not placed well by RDKit once the core is fixed. Put its other atoms on an arc of equal bonds between the ends
+    # of the shared path, on the far side from that path (for a single shared bond, from the core ring it borders).
+    rings = [list(r) for r in Chem.GetSymmSSSR(ligand)]
+    core = set(match)
+    bond = float(np.median([np.linalg.norm(coords[b.GetBeginAtomIdx()] - coords[b.GetEndAtomIdx()])
+                            for b in ligand.GetBonds() if b.GetBeginAtomIdx() in core and b.GetEndAtomIdx() in core]))
+    for ring in rings:
+        shared = [a for a in ring if a in core]
+        free = [a for a in ring if a not in core]
+        if len(shared) < 2 or not free or len(ring) > 8 or any(a in coords for a in free):
+            continue
+        k = next(i for i, a in enumerate(ring) if a in core and ring[(i + 1) % len(ring)] not in core)
+        ring = ring[k:] + ring[:k]  # ring[0]: last shared atom before the free run; then the free atoms in order
+        run = [a for a in ring[1:] if a not in core]
+        if ring[1 + len(run):] != [a for a in ring if a in core][1:]:
+            continue  # shared atoms are not one contiguous path
+        p0, p1 = coords[ring[0]], coords[ring[len(run) + 1]]
+        if len(shared) == 2:
+            host = next((r for r in rings if set(shared) <= set(r) and set(r) <= core), None)
+            if host is None:
+                continue
+            away_from = np.mean([coords[a] for a in host], axis=0)
+        else:
+            away_from = np.mean([coords[a] for a in shared], axis=0)
+        mid, chord = (p0 + p1) / 2, p1 - p0
+        span = float(np.linalg.norm(chord))
+        normal = np.array([-chord[1], chord[0]]) / max(span, 1e-9)
+        if np.dot(normal, mid - away_from) < 0:
+            normal = -normal
+        steps = len(run) + 1
+        # Circle through p0 and p1 bulging along `normal`, whose arc splits into `steps` chords of length `bond`.
+        lo, hi = span / 2 + 1e-6, 50 * bond
+        for _ in range(60):
+            r = (lo + hi) / 2
+            half = np.arcsin(min(1.0, span / (2 * r)))
+            theta = (2 * np.pi - 2 * half) / steps  # take the long (outer) arc
+            lo, hi = (r, hi) if 2 * r * np.sin(theta / 2) < bond else (lo, r)
+        half = np.arcsin(min(1.0, span / (2 * r)))
+        centre = mid + normal * r * np.cos(half)  # the long arc: the centre is on the bulge side
+        a0 = np.arctan2(*(p0 - centre)[::-1])
+        a1 = np.arctan2(*(p1 - centre)[::-1])
+        sweep = (a1 - a0) % (2 * np.pi)
+        direction = -1 if sweep < np.pi else 1  # go the long way round, through the outer side
+        total = sweep if direction == 1 else 2 * np.pi - sweep
+        for j, a in enumerate(run, start=1):
+            angle = a0 + direction * total * j / steps
+            coords[a] = centre + r * np.array([np.cos(angle), np.sin(angle)])
+    # Substituents on the core point out of the macrocycle (its middle is where the metal and its bonds go): put a
+    # core atom's one unplaced, acyclic neighbour in its widest outward-facing gap.
+    middle = template.mean(axis=0)
+    for a in match:
+        nbrs = [n.GetIdx() for n in ligand.GetAtomWithIdx(a).GetNeighbors()]
+        free = [n for n in nbrs if n not in coords]
+        if len(free) != 1 or ligand.GetAtomWithIdx(free[0]).IsInRing():
+            continue
+        angles = sorted(np.arctan2(*(coords[n] - coords[a])[::-1]) for n in nbrs if n in coords)
+        outward = coords[a] - middle
+        best = None
+        for k, start in enumerate(angles):
+            end = angles[(k + 1) % len(angles)] + (2 * np.pi if k + 1 == len(angles) else 0)
+            mid = (start + end) / 2
+            direction = np.array([np.cos(mid), np.sin(mid)])
+            key = (np.dot(direction, outward) > 0, end - start)
+            if best is None or key > best[0]:
+                best = (key, direction)
+        coords[free[0]] = coords[a] + bond * best[1]
+    trial = Chem.Mol(ligand)
+    try:
+        with rdBase.BlockLogs():
+            rdDepictor.Compute2DCoords(trial, coordMap={a: Point2D(*xy) for a, xy in coords.items()})
+    except Exception:
+        return False
+    # The folded layout can score well on these counts while looking wrong, so the textbook core wins unless it
+    # adds crossings, overlaps or stretched bonds (a slightly longer longest bond does not count).
+    if _score(quality(trial))[:2] > _score(quality(ligand))[:2]:
+        return False
+    ligand.RemoveAllConformers()
+    ligand.AddConformer(Chem.Conformer(trial.GetConformer()), assignId=True)
+    return True
+
+
 def layout(mol) -> dict:
     """Compute 2D coordinates in place; returns how they were made and how good they are."""
     chelate = _chelated_metal(mol)
@@ -152,6 +270,7 @@ def layout(mol) -> dict:
         ligand.UpdatePropertyCache(strict=False)
         # RDKit's ring templates give the textbook square porphyrin (pyrroles on the four sides, N pointing in).
         rdDepictor.Compute2DCoords(ligand, useRingTemplates=True)
+        _pin_porphyrinoid(ligand)
         _turn_substituents_down(ligand, donors)
         conf = Chem.Conformer(ligand.GetConformer())
         centre = np.mean([list(conf.GetAtomPosition(n)) for n in donors], axis=0)

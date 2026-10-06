@@ -97,11 +97,16 @@ def _atom_name(i: int, locants: dict | None) -> str:
     locant = (locants or {}).get(str(i))
     return f"C{locant}, atom {i}" if locant else f"atom {i}"
 
-def _svg(mol, width: int, height: int, atom_indices: bool, locants: dict | None = None):
-    """Depict an already-parsed molecule; returns the SVG, the drawing's wedge/dash bonds and layout quality."""
+def _svg(mol, width: int, height: int, atom_indices: bool, locants: dict | None = None, open_atoms=()):
+    """Depict an already-parsed molecule; returns the SVG, the drawing's wedge/dash bonds and layout quality.
+    open_atoms: stereocentres the input leaves unspecified; RDKit annotates them "(?)" in the same style and with the
+    same collision-avoiding placement as R/S (the viewer shows them only when asked for all stereo labels)."""
     original_atoms = mol.GetNumAtoms()
     depiction = layout(mol)
     mol = rdMolDraw2D.PrepareMolForDrawing(mol)
+    for i in open_atoms:
+        if i < original_atoms and not mol.GetAtomWithIdx(i).HasProp("_CIPCode"):
+            mol.GetAtomWithIdx(i).SetProp("_CIPCode", "?")
     drawer = rdMolDraw2D.MolDraw2DSVG(width, height)
     drawer.drawOptions().addAtomIndices = atom_indices and not locants
     drawer.drawOptions().addStereoAnnotation = True
@@ -197,11 +202,13 @@ def draw(smiles: str, width: int = 640, height: int = 420, atom_indices: bool = 
     mol, coordination_note = depiction_mol(smiles, hydrogens)
     electron_map = electrons(mol)
     drawn_bonds = [[b.GetBeginAtomIdx(), b.GetEndAtomIdx()] for b in mol.GetBonds()]
-    svg, bonds, depiction, atom_px = _svg(mol, width, height, atom_indices, locants)
+    analysis = analyze(smiles)
+    svg, bonds, depiction, atom_px = _svg(mol, width, height, atom_indices, locants,
+                                          analysis["stereo_summary"]["unspecified_atoms"])
     if coordination_note:
         depiction["coordination_note"] = coordination_note
     return {"svg": svg, "atom_px": atom_px, "drawn_bonds": drawn_bonds, "lone_pairs": electron_map, "depicted_stereo_bonds": bonds, "depiction": depiction, "note": WEDGE_NOTE,
-            "analysis": analyze(smiles)}
+            "analysis": analysis}
 
 def conformer(smiles: str, hydrogens: bool = False) -> dict:
     heavy, _ = depiction_mol(smiles, False)
