@@ -1,6 +1,6 @@
 # MolTalk — draw, rotate and name organic molecules
 
-<p align="center"><img src="assets/logo.svg" alt="MolTalk logo: dodecahedrane drawn as a view of its 3D shape" width="180"></p>
+<img src="assets/banner.svg" alt="MolTalk logo: dodecahedrane drawn as a view of its 3D shape" width="100%">
 
 A ChatGPT plugin (RDKit + MCP). Python package `moltalk`, command `moltalk`, background service `moltalk-tunnel`, settings in `~/.config/moltalk`.
 
