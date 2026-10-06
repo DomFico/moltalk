@@ -111,3 +111,40 @@ def test_porphyrin_type_macrocycles_get_the_textbook_square(name):
     match = mol.GetSubstructMatch(query)
     pos = mol.GetConformer().GetPositions()[list(match), :2]
     assert match and _shape_rmsd(pos, template) < 0.1
+
+MACROCYCLES.update({
+    "tin phthalocyanine dichloride": "C1=CC=C2C(=C1)C3=NC4=NC(=NC5=C6C=CC=CC6=C(N5)N=C7C8=CC=CC=C8C(=N7)N=C2N3)C9=CC=CC=C94.Cl[Sn]Cl",
+    "naphthalocyanine": "c1ccc2cc3c(cc2c1)-c1nc2nc(nc4[nH]c([nH]c5nc(nc-3n1)-c1cc3ccccc3cc1-5)c1cc3ccccc3cc41)-c1cc3ccccc3cc1-2",
+})
+
+
+@pytest.mark.parametrize("name", list(MACROCYCLES))
+def test_macrocycles_keep_their_shape_with_hydrogens(name):
+    import numpy as np
+    from moltalk.chemistry import depiction_mol
+    from moltalk.depiction import _porphyrinoid_core, _shape_rmsd
+    mol, _ = depiction_mol(MACROCYCLES[name], True)
+    layout(mol)
+    query, template = _porphyrinoid_core()
+    match = mol.GetSubstructMatch(query)
+    assert match and _shape_rmsd(mol.GetConformer().GetPositions()[list(match), :2], template) < 0.1
+
+
+def test_metal_with_its_own_ligands_sits_in_the_ring():
+    # PubChem stores tin phthalocyanine dichloride as the free-base ring plus a separate Cl-Sn-Cl: tin floated beside
+    # the ring. Now Sn bonds to the four ring nitrogens (replacing the two N-H) and keeps its chlorides.
+    from moltalk.chemistry import depiction_mol
+    from moltalk.depiction import _chelated_metal
+    mol, note = depiction_mol(MACROCYCLES["tin phthalocyanine dichloride"])
+    metal, donors = _chelated_metal(mol)
+    assert mol.GetAtomWithIdx(metal).GetSymbol() == "Sn" and mol.GetAtomWithIdx(metal).GetDegree() == 6
+    assert "replacing 2 N–H" in note
+
+
+def test_separate_cyanide_is_bonded_to_cobalt_in_b12():
+    from moltalk import library
+    from moltalk.chemistry import depiction_mol
+    from moltalk.depiction import _chelated_metal
+    mol, note = depiction_mol(library.find_name("cyanocobalamin")[1]["smiles"])
+    metal, donors = _chelated_metal(mol)
+    assert {n.GetSymbol() for n in mol.GetAtomWithIdx(metal).GetNeighbors()} == {"N", "C"} and "ligand is bonded" in note

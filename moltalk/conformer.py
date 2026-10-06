@@ -21,6 +21,7 @@ SINGLE_TIMEOUT_S = 10  # last resort: one conformer, when several could not be m
 FIT_RETRY_MAX_ATOMS = 15
 LARGE_ATOMS = 50
 LARGE_CANDIDATES = 2
+LARGE_ROTATABLE = 5
 GOOD_FIT = 0.15  # weighted RMSD (bond-length units) below which a conformer already lifts smoothly from the drawing
 RETRY_BUDGET_S = 1.5  # ...and only if the first round was quick
 
@@ -53,10 +54,22 @@ def _spectral_sphere(mol, cage, bond_length=1.42):
     return pos * (bond_length / mean)
 
 
+def _large_and_flexible(mol) -> bool:
+    """The speed shortcut (fewer candidates, shorter force-field clean-up) is for big molecules with long flexible
+    chains (chlorophyll; erythromycin has 7 rotatable bonds), which are slow. A big rigid aromatic one (naphthalocyanine) is fast anyway and needs the
+    full clean-up to come out flat."""
+    from rdkit.Chem import rdMolDescriptors
+    if mol.GetNumHeavyAtoms() <= LARGE_ATOMS:
+        return False
+    heavy = Chem.RemoveHs(mol, sanitize=False)
+    Chem.FastFindRings(heavy)  # removing atoms leaves no ring information
+    return rdMolDescriptors.CalcNumRotatableBonds(heavy) >= LARGE_ROTATABLE
+
+
 def _optimize(mol, method):
     """Force-field clean-up of every conformer on mol. Large molecules get a shorter clean-up: ETKDG geometry is
     already reasonable, and the viewer needs a picture, not an energy minimum (chlorophyll: 1.7 s of MMFF)."""
-    iterations = 300 if mol.GetNumHeavyAtoms() > LARGE_ATOMS else 1000
+    iterations = 300 if _large_and_flexible(mol) else 1000
     if AllChem.MMFFHasAllMoleculeParams(mol):
         AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=iterations)
         return method + " + MMFF94"
@@ -320,6 +333,27 @@ def _drawn_positions(embedded, conf_id, drawn, site):
     if site:
         metal, donors = site
         out[metal] = out[donors].mean(axis=0)
+        # Axial ligands (tin's chlorides, B12's cyanide) were embedded as a separate piece: put them above and below
+        # the ring plane, about 2 Å from the metal, keeping each ligand's own shape.
+        from .depiction import _axial_branches
+        _, _, vt = np.linalg.svd(out[donors] - out[metal])
+        normal = vt[2]
+        for k, branch in enumerate(_axial_branches(drawn, metal, donors)):
+            side = normal if k % 2 == 0 else -normal
+            rel = out[branch] - out[branch[0]]
+            spread = rel[1:].mean(axis=0) if len(branch) > 1 else side
+            if np.linalg.norm(spread) > 1e-6:
+                u = spread / np.linalg.norm(spread)
+                axis = np.cross(u, side)
+                sin, cos = np.linalg.norm(axis), float(np.dot(u, side))
+                if sin > 1e-6:
+                    axis /= sin
+                    kx = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+                    rot = np.eye(3) + sin * kx + (1 - cos) * kx @ kx
+                    rel = rel @ rot.T
+                elif cos < 0:
+                    rel = -rel
+            out[branch] = out[metal] + 2.0 * side + rel
     return out
 
 
@@ -485,7 +519,8 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     wedges = [(b.GetBeginAtomIdx(), b.GetEndAtomIdx(), 1 if b.GetBondDir() == Chem.BondDir.BEGINWEDGE else -1)
               for b in flat_heavy.GetBonds() if b.GetBondDir() in (Chem.BondDir.BEGINWEDGE, Chem.BondDir.BEGINDASH)]
     # Porphyrin-type rings are essentially flat; among the candidates prefer the flattest ring.
-    macrocycle = _cage(mol_in) if site else []
+    from .depiction import _porphyrinoid_core
+    macrocycle = list(mol_in.GetSubstructMatch(_porphyrinoid_core()[0])) or (_cage(mol_in) if site else [])
     from .chemistry import electrons
     electron_map = electrons(drawn)
     vsepr = vsepr_centres(drawn_heavy, electron_map)
@@ -505,7 +540,7 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     started = time.monotonic()
     # Large molecules (chlorophyll) get one round of a few candidates: each embedding costs ~0.5 s on a desktop and
     # ~1.5 s on Cloud Run, and the refinements below (robust alignment, tail swing, cavity fit) do the shaping.
-    rounds = (LARGE_CANDIDATES,) if heavy_count > LARGE_ATOMS else CANDIDATE_CONFORMERS
+    rounds = (LARGE_CANDIDATES,) if _large_and_flexible(mol_in) else CANDIDATE_CONFORMERS
     for count in rounds:
         if best is not None and time.monotonic() - started > RETRY_BUDGET_S:
             break  # a big, slow molecule (erythromycin): more conformers would mostly time out

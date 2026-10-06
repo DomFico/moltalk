@@ -14,46 +14,122 @@ METALS = set("Li Be Na Mg Al K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Rb Sr Y Zr Nb 
              "Cs Ba La Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi".split())
 
 
+def _macrocycle_nitrogens(mol, exclude=()):
+    """Nitrogens of the five-membered rings fused into a macrocycle (a ring of 12+ atoms): the four inward-facing
+    donors of a porphyrin, phthalocyanine or corrin. Not other ring nitrogens (B12's benzimidazole)."""
+    # Ring perception without the metal's bonds: once drawn, the M–N bonds create small chelate rings and RDKit's
+    # smallest ring set no longer contains the macrocycle itself.
+    bare = Chem.RWMol(mol)
+    for bond in list(bare.GetBonds()):
+        if bond.GetBeginAtom().GetSymbol() in METALS or bond.GetEndAtom().GetSymbol() in METALS:
+            bare.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
+    bare = bare.GetMol()
+    bare.UpdatePropertyCache(strict=False)
+    Chem.GetSymmSSSR(bare)
+    rings = [set(r) for r in bare.GetRingInfo().AtomRings()]
+    macro = [r for r in rings if len(r) >= 12]
+    found = set()
+    for ring in rings:
+        if len(ring) == 5 and any(len(ring & m) >= 2 for m in macro):
+            found |= {i for i in ring if mol.GetAtomWithIdx(i).GetSymbol() == "N" and i not in exclude}
+    return sorted(found)
+
+
 def find_site(mol):
-    """Return (metal index, [four donor N indices]) or None."""
-    ions = [f[0] for f in Chem.GetMolFrags(mol) if len(f) == 1 and mol.GetAtomWithIdx(f[0]).GetSymbol() in METALS]
-    if len(ions) != 1:
+    """(metal index, [four donor N indices], [axial ligand atom indices]) or None.
+    The metal is a separate piece: a bare ion ([Ni+2]) or a metal with its own small ligands (Cl-Sn-Cl, as PubChem
+    stores tin phthalocyanine dichloride). Axial ligands stored as separate pieces (B12's cyanide, a chloride ion) are
+    attached to the metal for the drawing."""
+    frags = Chem.GetMolFrags(mol)
+    metal_frags = [f for f in frags if len(f) <= 7 and sum(mol.GetAtomWithIdx(i).GetSymbol() in METALS for i in f) == 1]
+    if len(metal_frags) != 1:
         return None
-    ring_info = mol.GetRingInfo()
-    donors = [a.GetIdx() for a in mol.GetAtoms()
-              if a.GetSymbol() == "N" and a.GetDegree() == 2 and a.GetTotalNumHs() == 0
-              and a.GetFormalCharge() in (0, -1) and ring_info.IsAtomInRingOfSize(a.GetIdx(), 5)]
+    metal = next(i for i in metal_frags[0] if mol.GetAtomWithIdx(i).GetSymbol() in METALS)
+    donors = [n for n in _macrocycle_nitrogens(mol)
+              if mol.GetAtomWithIdx(n).GetDegree() == 2 and mol.GetAtomWithIdx(n).GetFormalCharge() in (0, -1)]
     if len(donors) != 4:
         return None
-    return ions[0], donors
+    axial = []
+    for f in frags:
+        if f is metal_frags[0] or len(f) > 2:
+            continue
+        atoms = [mol.GetAtomWithIdx(i) for i in f]
+        if any(a.GetSymbol() in METALS for a in atoms):
+            continue
+        # The ligand's binding atom: the charged or radical one (carbon of cyanide).
+        binding = [a for a in atoms if a.GetFormalCharge() < 0 or a.GetNumRadicalElectrons()]
+        if binding:
+            axial.append(min(binding, key=lambda a: (a.GetSymbol() != "C", a.GetIdx())).GetIdx())
+    return metal, donors, axial
 
 
 def coordinate(mol):
-    """Return (molecule with metal–N bonds, note) or (None, None) when the pattern does not apply."""
+    """Return (molecule with metal bonds, note) or (None, None) when the pattern does not apply.
+    Bonds are covalent while the metal has charge or valence to spare (anionic ligands first, then anionic or N-H
+    ring nitrogens, whose H the metal replaces as in the real complex), and dative otherwise."""
     site = find_site(mol)
     if site is None:
         return None, None
-    metal, donors = site
+    metal, donors, axial = site
     rw = Chem.RWMol(mol)
     ion = rw.GetAtomWithIdx(metal)
+    symbol = ion.GetSymbol()
+    valences = [v for v in Chem.GetPeriodicTable().GetValenceList(symbol) if v > 0]
+    spare = max(0, ion.GetFormalCharge())
+    if ion.GetFormalCharge() == 0 and valences:
+        spare = max(0, max(valences) - ion.GetExplicitValence())
+    # All or nothing: bonds become covalent only when the metal's spare charge (or valence) is matched exactly by
+    # the anionic or radical ligands plus the anionic and N-H ring nitrogens (heme: Fe2+ and two N-; B12: Co2+, the
+    # cyanide radical and one N-H; tin dichloride: two spare valences and two N-H). Otherwise every bond is dative
+    # and each charge stays as the database gives it.
     anionic = [d for d in donors if rw.GetAtomWithIdx(d).GetFormalCharge() == -1]
-    covalent = anionic if anionic and len(anionic) == ion.GetFormalCharge() else []
+    nh = [d for d in donors if d not in anionic and rw.GetAtomWithIdx(d).GetTotalNumHs() > 0]
+    match = spare > 0 and len(axial) + len(anionic) + len(nh) == spare
+    covalent, dative, removed_h = [], [], 0
+    for a in axial:
+        atom = rw.GetAtomWithIdx(a)
+        if match:
+            rw.AddBond(a, metal, Chem.BondType.SINGLE)
+            if atom.GetNumRadicalElectrons():
+                atom.SetNumRadicalElectrons(atom.GetNumRadicalElectrons() - 1)
+            elif atom.GetFormalCharge() < 0:
+                atom.SetFormalCharge(atom.GetFormalCharge() + 1)
+            if ion.GetFormalCharge() > 0:
+                ion.SetFormalCharge(ion.GetFormalCharge() - 1)
+        else:
+            rw.AddBond(a, metal, Chem.BondType.DATIVE)
     for d in donors:
-        if d in covalent:
+        atom = rw.GetAtomWithIdx(d)
+        if match and (d in anionic or d in nh):
             rw.AddBond(d, metal, Chem.BondType.SINGLE)
-            rw.GetAtomWithIdx(d).SetFormalCharge(0)
-            ion.SetFormalCharge(ion.GetFormalCharge() - 1)
+            if d in anionic:
+                atom.SetFormalCharge(0)
+            else:
+                atom.SetNumExplicitHs(0)
+                atom.SetNoImplicit(True)
+                removed_h += 1
+            if ion.GetFormalCharge() > 0:
+                ion.SetFormalCharge(ion.GetFormalCharge() - 1)
+            covalent.append(d)
         else:
             rw.AddBond(d, metal, Chem.BondType.DATIVE)
+            dative.append(d)
     out = rw.GetMol()
     try:
-        Chem.SanitizeMol(out)
+        # Metals are hypervalent here (tin: two chlorides and four N; RDKit counts dative bonds), so skip only the
+        # valence check; everything else is still sanitised.
+        Chem.SanitizeMol(out, Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_PROPERTIES)
+        out.UpdatePropertyCache(strict=False)
     except Exception:
         return None, None
-    symbol = ion.GetSymbol()
-    kinds = f"{len(covalent)} covalent and {4 - len(covalent)} dative" if covalent else "4 dative"
-    note = (f"{symbol}–N bonds ({kinds}) are drawn to the four ring nitrogens for this picture. The source structure "
-            f"lists {symbol} as a separate ion; the analysis, formula and charges use that structure unchanged.")
+    kinds = f"{len(covalent)} covalent and {len(dative)} dative" if covalent else "4 dative"
+    note = (f"{symbol}–N bonds ({kinds}) are drawn to the four ring nitrogens for this picture")
+    if removed_h:
+        note += f", replacing {removed_h} N–H hydrogen{'s' if removed_h > 1 else ''} as in the complex"
+    if axial:
+        note += f", and {len(axial)} separately listed ligand{'s are' if len(axial) > 1 else ' is'} bonded to {symbol}"
+    note += (f". The source structure lists {symbol} as a separate piece; the analysis, formula and charges use that "
+             "structure unchanged.")
     return out, note
 
 

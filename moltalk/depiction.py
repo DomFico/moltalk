@@ -175,13 +175,31 @@ def _is_cage(mol) -> bool:
 
 
 def _chelated_metal(mol):
-    """(metal index, ligand atom indices) for a metal bonded only to four nitrogens, as in a drawn porphyrin."""
-    from .coordination import METALS
+    """(metal index, four donor N indices) for a metal bonded to the four macrocycle nitrogens of a drawn porphyrin,
+    phthalocyanine or corrin; it may carry further (axial) ligands, such as tin's two chlorides or B12's cyanide."""
+    from .coordination import METALS, _macrocycle_nitrogens
     for atom in mol.GetAtoms():
-        neighbours = [n.GetIdx() for n in atom.GetNeighbors()]
-        if atom.GetSymbol() in METALS and len(neighbours) == 4 and all(mol.GetAtomWithIdx(n).GetSymbol() == "N" for n in neighbours):
-            return atom.GetIdx(), neighbours
+        if atom.GetSymbol() not in METALS:
+            continue
+        ring_n = set(_macrocycle_nitrogens(mol))
+        donors = [n.GetIdx() for n in atom.GetNeighbors() if n.GetIdx() in ring_n]
+        if len(donors) == 4:
+            return atom.GetIdx(), donors
     return None
+
+
+def _axial_branches(mol, metal, donors):
+    """The metal's other ligands, each as the list of atoms reachable from it without passing the metal."""
+    branches = []
+    for start in (n.GetIdx() for n in mol.GetAtomWithIdx(metal).GetNeighbors() if n.GetIdx() not in donors):
+        seen, todo = {start}, [start]
+        while todo:
+            for n in mol.GetAtomWithIdx(todo.pop()).GetNeighbors():
+                if n.GetIdx() not in seen and n.GetIdx() != metal:
+                    seen.add(n.GetIdx()); todo.append(n.GetIdx())
+        if not seen & set(donors):  # a ligand tethered back into the ring system is not axial
+            branches.append(sorted(seen, key=lambda i: (i != start, i)))
+    return branches
 
 
 def _turn_substituents_down(mol, donors):
@@ -250,47 +268,54 @@ def _pin_porphyrinoid(ligand, force=False) -> bool:
     core = set(match)
     bond = float(np.median([np.linalg.norm(coords[b.GetBeginAtomIdx()] - coords[b.GetEndAtomIdx()])
                             for b in ligand.GetBonds() if b.GetBeginAtomIdx() in core and b.GetEndAtomIdx() in core]))
-    for ring in rings:
-        shared = [a for a in ring if a in core]
-        free = [a for a in ring if a not in core]
-        if len(shared) < 2 or not free or len(ring) > 8 or any(a in coords for a in free):
-            continue
-        k = next(i for i, a in enumerate(ring) if a in core and ring[(i + 1) % len(ring)] not in core)
-        ring = ring[k:] + ring[:k]  # ring[0]: last shared atom before the free run; then the free atoms in order
-        run = [a for a in ring[1:] if a not in core]
-        if ring[1 + len(run):] != [a for a in ring if a in core][1:]:
-            continue  # shared atoms are not one contiguous path
-        p0, p1 = coords[ring[0]], coords[ring[len(run) + 1]]
-        if len(shared) == 2:
-            host = next((r for r in rings if set(shared) <= set(r) and set(r) <= core), None)
-            if host is None:
-                continue
-            away_from = np.mean([coords[a] for a in host], axis=0)
-        else:
-            away_from = np.mean([coords[a] for a in shared], axis=0)
-        mid, chord = (p0 + p1) / 2, p1 - p0
-        span = float(np.linalg.norm(chord))
-        normal = np.array([-chord[1], chord[0]]) / max(span, 1e-9)
-        if np.dot(normal, mid - away_from) < 0:
-            normal = -normal
-        steps = len(run) + 1
-        # Circle through p0 and p1 bulging along `normal`, whose arc splits into `steps` chords of length `bond`.
-        lo, hi = span / 2 + 1e-6, 50 * bond
-        for _ in range(60):
-            r = (lo + hi) / 2
-            half = np.arcsin(min(1.0, span / (2 * r)))
-            theta = (2 * np.pi - 2 * half) / steps  # take the long (outer) arc
-            lo, hi = (r, hi) if 2 * r * np.sin(theta / 2) < bond else (lo, r)
-        half = np.arcsin(min(1.0, span / (2 * r)))
-        centre = mid + normal * r * np.cos(half)  # the long arc: the centre is on the bulge side
-        a0 = np.arctan2(*(p0 - centre)[::-1])
-        a1 = np.arctan2(*(p1 - centre)[::-1])
-        sweep = (a1 - a0) % (2 * np.pi)
-        direction = -1 if sweep < np.pi else 1  # go the long way round, through the outer side
-        total = sweep if direction == 1 else 2 * np.pi - sweep
-        for j, a in enumerate(run, start=1):
-            angle = a0 + direction * total * j / steps
-            coords[a] = centre + r * np.array([np.cos(angle), np.sin(angle)])
+    # Repeat outward, ring by ring: a ring fused to an already placed ring (the outer ring of naphthalocyanine's
+    # naphtho groups) is placed the same way, instead of being left to RDKit and bent.
+    progress = True
+    while progress:
+      progress = False
+      placed = set(coords)
+      for ring in rings:
+          shared = [a for a in ring if a in placed]
+          free = [a for a in ring if a not in placed]
+          if len(shared) < 2 or not free or len(ring) > 8 or any(a in coords for a in free):
+              continue
+          k = next(i for i, a in enumerate(ring) if a in placed and ring[(i + 1) % len(ring)] not in placed)
+          ring = ring[k:] + ring[:k]  # ring[0]: last shared atom before the free run; then the free atoms in order
+          run = [a for a in ring[1:] if a not in placed]
+          if ring[1 + len(run):] != [a for a in ring if a in placed][1:]:
+              continue  # shared atoms are not one contiguous path
+          p0, p1 = coords[ring[0]], coords[ring[len(run) + 1]]
+          if len(shared) == 2:
+              host = next((r for r in rings if set(shared) <= set(r) and set(r) <= placed), None)
+              if host is None:
+                  continue
+              away_from = np.mean([coords[a] for a in host], axis=0)
+          else:
+              away_from = np.mean([coords[a] for a in shared], axis=0)
+          mid, chord = (p0 + p1) / 2, p1 - p0
+          span = float(np.linalg.norm(chord))
+          normal = np.array([-chord[1], chord[0]]) / max(span, 1e-9)
+          if np.dot(normal, mid - away_from) < 0:
+              normal = -normal
+          steps = len(run) + 1
+          # Circle through p0 and p1 bulging along `normal`, whose arc splits into `steps` chords of length `bond`.
+          lo, hi = span / 2 + 1e-6, 50 * bond
+          for _ in range(60):
+              r = (lo + hi) / 2
+              half = np.arcsin(min(1.0, span / (2 * r)))
+              theta = (2 * np.pi - 2 * half) / steps  # take the long (outer) arc
+              lo, hi = (r, hi) if 2 * r * np.sin(theta / 2) < bond else (lo, r)
+          half = np.arcsin(min(1.0, span / (2 * r)))
+          centre = mid + normal * r * np.cos(half)  # the long arc: the centre is on the bulge side
+          a0 = np.arctan2(*(p0 - centre)[::-1])
+          a1 = np.arctan2(*(p1 - centre)[::-1])
+          sweep = (a1 - a0) % (2 * np.pi)
+          direction = -1 if sweep < np.pi else 1  # go the long way round, through the outer side
+          total = sweep if direction == 1 else 2 * np.pi - sweep
+          for j, a in enumerate(run, start=1):
+              angle = a0 + direction * total * j / steps
+              coords[a] = centre + r * np.array([np.cos(angle), np.sin(angle)])
+          progress = True
     # Substituents on the core and its fused rings point out of the macrocycle (its middle is where the metal and its
     # bonds go): put a placed atom's one unplaced, acyclic neighbour in its widest outward-facing gap.
     middle = template.mean(axis=0)
@@ -350,7 +375,8 @@ def layout(mol) -> dict:
         placed = quality(mol)
         # RDKit's own all-at-once layout is sometimes tidier for small molecules (glucose's ring hydrogens); keep it
         # only when it has strictly fewer crossings, overlaps and stretched bonds (and the skeleton needed no fix-up).
-        if result["method"] == "rdkit" and not _chelated_metal(skeleton):
+        if result["method"] == "rdkit" and not _chelated_metal(skeleton) and not _has_macrocycle(skeleton):
+            # (Never for a macrocycle: RDKit's all-at-once layout of chlorin e6 is round again.)
             whole = Chem.Mol(mol)
             with rdBase.BlockLogs():
                 rdDepictor.Compute2DCoords(whole)
@@ -378,6 +404,22 @@ def layout(mol) -> dict:
         conf = Chem.Conformer(ligand.GetConformer())
         centre = np.mean([list(conf.GetAtomPosition(n)) for n in donors], axis=0)
         conf.SetAtomPosition(metal, Point3D(*centre))
+        # Axial ligands (tin's chlorides, B12's cyanide) point out of the paper; draw them along the diagonals between
+        # the M–N bonds, one bond length out, keeping each ligand's own shape.
+        n_dirs = [np.array(list(conf.GetAtomPosition(n)))[:2] - centre[:2] for n in donors]
+        base = np.arctan2(n_dirs[0][1], n_dirs[0][0]) + np.pi / 4
+        for k, branch in enumerate(_axial_branches(ligand, metal, donors)):
+            angle = base + np.pi / 2 * [0, 2, 1, 3][k % 4]
+            direction = np.array([np.cos(angle), np.sin(angle)])
+            pts = np.array([list(conf.GetAtomPosition(i))[:2] for i in branch])
+            rel = pts - pts[0]
+            spread = rel[1:].mean(axis=0) if len(rel) > 1 else direction
+            turn = np.arctan2(direction[1], direction[0]) - np.arctan2(spread[1], spread[0])
+            c, s_ = np.cos(turn), np.sin(turn)
+            rel = rel @ np.array([[c, s_], [-s_, c]])
+            first = centre[:2] + 1.5 * direction
+            for i, p in zip(branch, rel):
+                conf.SetAtomPosition(i, Point3D(*(first + p), 0.0))
         mol.RemoveAllConformers()
         mol.AddConformer(conf, assignId=True)
         return {"method": "rdkit", **quality(mol)}

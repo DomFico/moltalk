@@ -136,3 +136,15 @@ def test_symmetric_cage_3d_does_not_hang():
     started = time.monotonic()
     model = conformer(DODECAHEDRANE, True)
     assert time.monotonic() - started < 10 and not any(a.get("cip") for a in model["atoms"])
+
+
+def test_big_rigid_aromatic_macrocycle_comes_out_flat():
+    # Naphthalocyanine (56 heavy atoms, no rotatable bonds) got the large-molecule shortcut and came out bowed
+    # (1.7 A out of plane); the shortcut is now for large *flexible* molecules only.
+    import numpy as np
+    from test_depiction import MACROCYCLES
+    from moltalk.chemistry import conformer
+    xyz = np.array([a["xyz"] for a in conformer(MACROCYCLES["naphthalocyanine"], False)["atoms"]])
+    centred = xyz - xyz.mean(axis=0)
+    normal = np.linalg.svd(centred)[2][2]
+    assert np.sqrt(((centred @ normal) ** 2).mean()) < 1.1
