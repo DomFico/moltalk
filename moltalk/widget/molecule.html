@@ -738,8 +738,10 @@
       this.centre = c;
       // Once lifted, the structure is centred and, if its 3D extent needs it, shrunk to fit the canvas.
       const lengths = model.bonds.map((b) => Math.hypot(px[b.a][0] - px[b.b][0], px[b.a][1] - px[b.b][1])).sort((p, q) => p - q);
-      let r3 = 0;
-      heavy.forEach((a) => { r3 = Math.max(r3, Math.hypot(a.xyz[0] - c[0], a.xyz[1] - c[1], a.xyz[2] - c[2])); });
+      // Size by the 90th-percentile atom distance, not the farthest atom: chlorophyll's phytyl tail would otherwise
+      // shrink the ring to a fraction of the canvas. Small molecules (up to ~10 heavy atoms) still use the farthest.
+      const radii = heavy.map((a) => Math.hypot(a.xyz[0] - c[0], a.xyz[1] - c[1], a.xyz[2] - c[2])).sort((p, q) => p - q);
+      const r3 = radii[Math.min(radii.length - 1, Math.floor(0.9 * radii.length))] || 0;
       // Shrink so the whole model (plus room for an atom label) stays inside the canvas in every orientation. A
       // small molecule's flat drawing fills the canvas, so a longer 3D bond (C–Br) would otherwise leave the frame.
       // The shrink is applied gradually as the drawing lifts, so it reads as part of the motion, not a jump.

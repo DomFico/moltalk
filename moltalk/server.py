@@ -11,14 +11,14 @@ from .export import export_structure as write_structure, MAX_EMBED_BYTES
 from .limits import runner
 from .naming import name_and_locants, pubchem_slot
 
-WIDGET_URI = "ui://widget/molecule-v19.html"
+WIDGET_URI = "ui://widget/molecule-v20.html"
 WIDGET_MIME = "text/html;profile=mcp-app"
 WIDGET_HTML = files("moltalk").joinpath("widget/molecule.html").read_text(encoding="utf-8")
 
 INSTRUCTIONS = """RDKit chemistry tools. Workflow rules:
 - For a compound name, call resolve_name first and use its canonical_smiles. It works offline for thousands of common compounds and any systematic IUPAC name; allow_network=true additionally lets it try PubChem. Report the source, PubChem CID/IUPAC name and stereo_summary; say explicitly when stereochemistry is missing or partial.
 - If you write SMILES yourself from a stereo-specific name, check the returned CIP labels against the name's descriptors and say whether they match.
-- To show a structure, call draw_molecule; the drawing renders inline for the user, and you receive the analysis plus depicted_stereo_bonds.
+- To show a structure, call draw_molecule; the drawing renders inline for the user, and you receive the analysis plus depicted_stereo_bonds. Each call opens a new viewer, so draw a molecule once per reply: the viewer itself has controls for hydrogens, atom numbers, stereo labels, lone pairs, 3D rotation and image export, so never redraw just to change those.
 - Atom indices are zero-based input-SMILES indices, not IUPAC locants. When draw_molecule returns locants (from the verified IUPAC name), refer to atoms by locant (e.g. C6a) and use indices only internally. Never invent locants or names the tools did not return.
 - Explain wedges/dashes only from depicted_stereo_bonds of that drawing; wedge/dash is not a synonym for R/S.
 - If draw_molecule's depiction has method 'schlegel' or a warning, tell the user what that means for the picture before describing it.

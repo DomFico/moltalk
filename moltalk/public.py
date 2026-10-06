@@ -5,8 +5,11 @@ keyed by ChatGPT's anonymous per-user id (params._meta["openai/subject"]) when p
 with a global cap on top so a traffic spike cannot run up the hosting bill.
 """
 import json
+import logging
 import os
 import time
+
+log = logging.getLogger("moltalk.http")
 
 PER_USER_PER_MINUTE = int(os.getenv("MOLTALK_RATE_PER_USER", "60"))
 GLOBAL_PER_MINUTE = int(os.getenv("MOLTALK_RATE_GLOBAL", "600"))
@@ -37,6 +40,24 @@ def _client_ip(scope) -> str:
             return value.decode(errors="replace").split(",")[0].strip()
     client = scope.get("client")
     return client[0] if client else "unknown"
+
+
+def _describe(body: bytes) -> str:
+    """Method (and tool name) of a JSON-RPC body, for the request log. Never the arguments: they hold structures."""
+    try:
+        message = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return "unparsable body"
+    messages = message if isinstance(message, list) else [message]
+    parts = []
+    for m in messages[:5]:
+        if not isinstance(m, dict):
+            parts.append(type(m).__name__)
+            continue
+        method = m.get("method") or ("response" if "result" in m or "error" in m else "?")
+        name = ((m.get("params") or {}).get("name") if isinstance(m.get("params"), dict) else None)
+        parts.append(f"{method}:{name}" if name else method)
+    return ("batch " if isinstance(message, list) else "") + ",".join(parts)
 
 
 def _subject(body: bytes) -> str | None:
@@ -100,4 +121,26 @@ class PublicGateway:
                 replayed = True
                 return {"type": "http.request", "body": body, "more_body": False}
             return await receive()
-        return await self.app(scope, replay, send)
+
+        # Log each request's method and the client's protocol version, and the server's reason for any 4xx: the
+        # platform log shows only the status, which did not explain why Claude's connector got 400s.
+        headers = {k.decode(errors="replace").lower(): v.decode(errors="replace") for k, v in scope.get("headers", [])}
+        what = _describe(body)
+        status, error = 0, b""
+
+        async def logged_send(message):
+            nonlocal status, error
+            if message["type"] == "http.response.start":
+                status = message["status"]
+            elif message["type"] == "http.response.body" and status >= 400 and len(error) < 600:
+                error += message.get("body", b"")[:600]
+            await send(message)
+        try:
+            return await self.app(scope, replay, logged_send)
+        finally:
+            line = f"{status} {what} protocol={headers.get('mcp-protocol-version', '-')} agent={headers.get('user-agent', '-')[:40]}"
+            if status >= 400:
+                log.warning("%s accept=%s content-type=%s error=%s", line, headers.get("accept", "-"),
+                            headers.get("content-type", "-"), error.decode(errors="replace")[:400])
+            else:
+                log.info(line)

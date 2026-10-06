@@ -128,6 +128,40 @@ def _embed(heavy, conformers=8):
         return mol, _optimize(mol, "ETKDGv3")
 
 
+def _extend_chains(mol, conf_id, min_chain=4):
+    """A copy of mol whose conformer conf_id has every torsion along open sp3 carbon chains set to anti (180°) and
+    is then force-field relaxed; None if there is no such chain of at least min_chain carbons."""
+    from rdkit.Chem import rdMolTransforms
+    chain = lambda a: a.GetSymbol() == "C" and not a.IsInRing() and a.GetHybridization() == Chem.HybridizationType.SP3
+    carbons = {a.GetIdx() for a in mol.GetAtoms() if chain(a)}
+    if len(carbons) < min_chain:
+        return None
+    torsions = []
+    for bond in mol.GetBonds():
+        b, c = bond.GetBeginAtom(), bond.GetEndAtom()
+        if bond.GetBondType() != Chem.BondType.SINGLE or bond.IsInRing() or b.GetIdx() not in carbons or c.GetIdx() not in carbons:
+            continue
+        a = next((n.GetIdx() for n in b.GetNeighbors() if n.GetIdx() != c.GetIdx() and n.GetAtomicNum() > 1), None)
+        d = next((n.GetIdx() for n in c.GetNeighbors() if n.GetIdx() != b.GetIdx() and n.GetAtomicNum() > 1), None)
+        if a is not None and d is not None:
+            torsions.append((a, b.GetIdx(), c.GetIdx(), d))
+    if len(torsions) < min_chain - 2:
+        return None
+    out = Chem.Mol(mol)
+    conf = out.GetConformer(conf_id)
+    for t in torsions:
+        try:
+            rdMolTransforms.SetDihedralDeg(conf, *t, 180.0)
+        except (RuntimeError, ValueError):
+            continue
+    with rdBase.BlockLogs():
+        if AllChem.MMFFHasAllMoleculeParams(out):
+            AllChem.MMFFOptimizeMolecule(out, confId=conf_id, maxIters=500)
+        elif AllChem.UFFHasAllMoleculeParams(out):
+            AllChem.UFFOptimizeMolecule(out, confId=conf_id, maxIters=500)
+    return out
+
+
 def _fit(xyz, xy, weights, scale=None):
     """Proper rotation (no reflection, so R/S is preserved), scale and offsets that best lay 3D coordinates onto the
     flat drawing's 2D layout, by weighted least squares. Returns (transform, weighted RMS misfit)."""
@@ -349,6 +383,18 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     from .chemistry import electrons
     electron_map = electrons(drawn)
     vsepr = vsepr_centres(drawn_heavy, electron_map)
+    def evaluate(candidate_mol, conf_id):
+        pos = _drawn_positions(candidate_mol, conf_id, drawn, site)
+        vsepr_lone = _apply_vsepr(pos, vsepr)
+        transform, fit, rot = _fit(pos[:heavy_count], xy_heavy, weights)
+        aligned = transform(pos)
+        contradicted = sum(np.sign(aligned[end, 2] - aligned[start, 2]) != sign for start, end, sign in wedges)
+        bend = 0.0
+        if macrocycle:
+            ring = pos[macrocycle] - pos[macrocycle].mean(axis=0)
+            bend = round(float(np.linalg.svd(ring, compute_uv=False)[2] / np.sqrt(len(macrocycle))), 2)
+        return (contradicted, bend, fit), conf_id, aligned, pos, rot, transform.scale, vsepr_lone
+
     best = mol = method = None
     started = time.monotonic()
     for count in CANDIDATE_CONFORMERS:
@@ -365,18 +411,9 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
         if site:
             candidate_method += ", ring embedded as the free base"
         for conf in candidate_mol.GetConformers():
-            pos = _drawn_positions(candidate_mol, conf.GetId(), drawn, site)
-            vsepr_lone = _apply_vsepr(pos, vsepr)
-            transform, fit, rot = _fit(pos[:heavy_count], xy_heavy, weights)
-            aligned = transform(pos)
-            contradicted = sum(np.sign(aligned[end, 2] - aligned[start, 2]) != sign for start, end, sign in wedges)
-            bend = 0.0
-            if macrocycle:
-                ring = pos[macrocycle] - pos[macrocycle].mean(axis=0)
-                bend = round(float(np.linalg.svd(ring, compute_uv=False)[2] / np.sqrt(len(macrocycle))), 2)
-            key = (contradicted, bend, fit)
-            if best is None or key < best[0]:
-                best = (key, conf.GetId(), aligned, pos, rot, transform.scale, vsepr_lone)
+            candidate = evaluate(candidate_mol, conf.GetId())
+            if best is None or candidate[0] < best[0]:
+                best = candidate
                 mol, method = candidate_mol, candidate_method
         # Stop when the wedges agree and the shape matches the drawing. A poor fit means the random conformers missed
         # the drawing's shape (8 conformers of 2-bromobutane had no anti chain, so lifting swung the methyl ~2 bond
@@ -385,6 +422,14 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
         # flexible ones (heme's side chains) never fit a flat drawing closely and would just take longer.
         if candidate_mol.GetNumConformers() == 1 or (best[0][0] == 0 and (best[0][2] <= GOOD_FIT or heavy_count > FIT_RETRY_MAX_ATOMS)):
             break
+    # Long open chains (chlorophyll's phytyl, fatty acids) come out of ETKDG crumpled, often folded back over the
+    # rest of the molecule. Straighten them to the extended zigzag, the textbook and low-energy shape that the flat
+    # drawing also shows, and keep it only if it matches the drawing better.
+    straightened = _extend_chains(mol, best[1])
+    if straightened is not None:
+        candidate = evaluate(straightened, best[1])
+        if candidate[0][0] <= best[0][0] and candidate[0][2] < best[0][2]:
+            best, mol = candidate, straightened
     (contradicted, _, rmsd), conf_id, xyz, raw, heavy_rot, heavy_scale, vsepr_lone = best
     frame_rot = heavy_rot
     to_heavy_frame = np.eye(3)
