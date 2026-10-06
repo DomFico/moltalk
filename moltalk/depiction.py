@@ -8,7 +8,7 @@ from functools import lru_cache
 
 import numpy as np
 from rdkit import Chem, rdBase
-from rdkit.Chem import rdDepictor
+from rdkit.Chem import rdDepictor, rdqueries
 from rdkit.Geometry import Point2D, Point3D
 
 STRETCH = 3.0      # bonds longer than this × the median count as stretched
@@ -160,6 +160,12 @@ def _best_view(xyz, heavy_bonds, heavy_ids):
     return (flat - flat[heavy_ids].mean(axis=0)) @ vt.T * (1.5 / bond)
 
 
+def _has_macrocycle(mol, size=12) -> bool:
+    """A ring of at least `size` atoms (porphyrin inner ring 16, corrole 15, crown ethers, macrolides)."""
+    Chem.GetSymmSSSR(mol)
+    return any(len(r) >= size for r in mol.GetRingInfo().AtomRings())
+
+
 def _is_cage(mol) -> bool:
     """Polyhedral cages have atoms shared by three or more rings (cubane, adamantane, C60)."""
     heavy = [a for a in mol.GetAtoms() if a.GetAtomicNum() != 1]
@@ -197,13 +203,22 @@ def _turn_substituents_down(mol, donors):
 
 @lru_cache(maxsize=1)
 def _porphyrinoid_core():
-    """(query, coordinates): the porphine skeleton (four N-rings joined by four one-carbon bridges) as a pattern that
+    """(query, coordinates): the porphine skeleton (four N-rings joined by four one-atom bridges) as a pattern that
     ignores bond orders, aromaticity and hydrogens, with its textbook square layout from RDKit's ring templates.
-    Hydroporphyrins such as coenzyme F430 match it, though their extra fused rings defeat RDKit's own template."""
+    A bridge may be carbon (porphyrins, chlorins, hydroporphyrins such as F430) or nitrogen (phthalocyanines,
+    porphyrazines); extra fused rings (F430, chlorophyll, the benzo rings of a phthalocyanine) defeat RDKit's own
+    template, but not this pattern."""
     porphine = Chem.MolFromSmiles("c1cc2cc3ccc(cc4ccc(cc5ccc(cc1n2)[nH]5)n4)[nH]3")
     rdDepictor.Compute2DCoords(porphine, useRingTemplates=True)
-    query = Chem.MolFromSmarts(re.sub(r"[:=\-]", "~", Chem.MolToSmarts(porphine)).replace("&H1", ""))
+    query = Chem.RWMol(Chem.MolFromSmarts(re.sub(r"[:=\-]", "~", Chem.MolToSmarts(porphine)).replace("&H1", "")))
     match = porphine.GetSubstructMatch(query)
+    ring_info = porphine.GetRingInfo()
+    for k, i in enumerate(match):
+        if porphine.GetAtomWithIdx(i).GetAtomicNum() == 6 and not ring_info.IsAtomInRingOfSize(i, 5):
+            bridge = rdqueries.AtomNumEqualsQueryAtom(6)  # a meso bridge: carbon or nitrogen
+            bridge.ExpandQuery(rdqueries.AtomNumEqualsQueryAtom(7), Chem.CompositeQueryType.COMPOSITE_OR)
+            query.ReplaceAtom(k, bridge)
+    query = query.GetMol()
     conf = porphine.GetConformer()
     return query, np.array([[conf.GetAtomPosition(i).x, conf.GetAtomPosition(i).y] for i in match])
 
@@ -216,7 +231,7 @@ def _shape_rmsd(a, b) -> float:
     return float(np.sqrt(((scale * a @ u @ vt - b) ** 2).sum(axis=1).mean()))
 
 
-def _pin_porphyrinoid(ligand) -> bool:
+def _pin_porphyrinoid(ligand, force=False) -> bool:
     """If the ligand has a porphyrin-type core that RDKit laid out badly (its fused rings folded inward), lay it out
     again with the core pinned to the textbook porphine square; RDKit then places fused rings and side chains."""
     query, template = _porphyrinoid_core()
@@ -225,7 +240,7 @@ def _pin_porphyrinoid(ligand) -> bool:
         return False
     conf = ligand.GetConformer()
     current = np.array([[conf.GetAtomPosition(i).x, conf.GetAtomPosition(i).y] for i in match])
-    if _shape_rmsd(current, template) < 0.25:  # already the textbook square (heme, chlorophyll)
+    if _shape_rmsd(current, template) < 0.25 and not force:  # already the textbook square (heme, chlorophyll)
         return False
     coords = {a: template[k] for k, a in enumerate(match)}
     # A ring fused to the core (F430's lactam along one bond; chlorophyll's ring E along ring C and a bridge carbon)
@@ -368,6 +383,34 @@ def layout(mol) -> dict:
         return {"method": "rdkit", **quality(mol)}
     rdDepictor.Compute2DCoords(mol)
     best_q = quality(mol)
+    if _has_macrocycle(mol):
+        # Porphyrins, corroles, corrins, phthalocyanines and other macrocycles: RDKit's ring templates give the
+        # textbook shapes (a square porphyrin, not a large circle); a porphyrin-type core that the templates miss
+        # (fused rings, nitrogen bridges, unusual tautomers) is pinned to the porphine square. Kept unless worse.
+        trial = Chem.Mol(mol)
+        rdDepictor.Compute2DCoords(trial, useRingTemplates=True)
+        _pin_porphyrinoid(trial)
+        candidates = [trial]
+        if _score(quality(trial))[:2] > (0, 0):
+            # The template's core is right but side groups collide (chlorin e6's neighbouring acids): pin anyway,
+            # which points every side group outward.
+            forced = Chem.Mol(trial)
+            if _pin_porphyrinoid(forced, force=True):
+                candidates.append(forced)
+        # The textbook layout wins unless it adds bond crossings or more than two crowded atom pairs: a right core
+        # with two side-group oxygens close together (chlorin e6) beats a round, distorted macrocycle.
+        default_q = best_q
+        chosen = None
+        for candidate in candidates:
+            q = quality(candidate)
+            fine = (q["bond_crossings"] <= default_q["bond_crossings"] and q["stretched_bonds"] <= default_q["stretched_bonds"]
+                    and q["overlapping_atoms"] <= default_q["overlapping_atoms"] + 2)
+            if fine and (chosen is None or _score(q) < _score(chosen[0])):
+                chosen = (q, candidate)
+        if chosen:
+            mol.RemoveAllConformers()
+            mol.AddConformer(Chem.Conformer(chosen[1].GetConformer()), assignId=True)
+            best_q = chosen[0]
     result = {"method": "rdkit", **best_q}
     if not (best_q["bond_crossings"] or best_q["stretched_bonds"] or best_q["overlapping_atoms"]):
         return result

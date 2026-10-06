@@ -84,3 +84,30 @@ def test_hydrogens_never_trigger_the_cage_fallback():
     smiles = analyze(library.find_name("FAD")[1]["smiles"])["canonical_smiles"]
     depiction = draw(smiles, 640, 420, False, True)["depiction"]
     assert depiction["method"] == "rdkit" and depiction["max_bond_length_ratio"] <= 1.2
+
+
+# Porphyrin-type macrocycles, metal and free base, with carbon or nitrogen bridges (PubChem SMILES, offline copies).
+MACROCYCLES = {
+    "nickel phthalocyanine": "C1=CC=C2C(=C1)C3=NC4=C5C=CC=CC5=C([N-]4)N=C6C7=CC=CC=C7C(=N6)N=C8C9=CC=CC=C9C(=NC2=N3)[N-]8.[Ni+2]",
+    "phthalocyanine": "C1=CC=C2C(=C1)C3=NC4=C5C=CC=CC5=C(N4)N=C6C7=CC=CC=C7C(=N6)N=C8C9=CC=CC=C9C(=NC2=N3)N8",
+    "tetraphenylporphyrin": "C1=CC=C(C=C1)C2=C3C=CC(=C(C4=NC(=C(C5=CC=C(N5)C(=C6C=CC2=N6)C7=CC=CC=C7)C8=CC=CC=C8)C=C4)C9=CC=CC=C9)N3",
+    "octaethylporphyrin": "CCC1=C(C2=CC3=C(C(=C(N3)C=C4C(=C(C(=N4)C=C5C(=C(C(=N5)C=C1N2)CC)CC)CC)CC)CC)CC)CC",
+}
+
+
+@pytest.mark.parametrize("name", list(MACROCYCLES))
+def test_porphyrin_type_macrocycles_get_the_textbook_square(name):
+    # Phthalocyanines (nitrogen bridges) and free-base porphyrins were drawn as stretched or round macrocycles; the
+    # nickel complex had Ni-N bonds 2.6x normal.
+    import numpy as np
+    from moltalk.chemistry import depiction_mol
+    from moltalk.depiction import _porphyrinoid_core, _shape_rmsd
+    smiles = MACROCYCLES[name]
+    depiction = draw(smiles, 640, 420, False)["depiction"]
+    assert depiction["bond_crossings"] == 0 and depiction["max_bond_length_ratio"] <= 1.6, depiction
+    mol, _ = depiction_mol(smiles)
+    layout(mol)
+    query, template = _porphyrinoid_core()
+    match = mol.GetSubstructMatch(query)
+    pos = mol.GetConformer().GetPositions()[list(match), :2]
+    assert match and _shape_rmsd(pos, template) < 0.1
