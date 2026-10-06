@@ -4,6 +4,7 @@ Requests from ChatGPT come from OpenAI's servers, so many users share a few IP a
 keyed by ChatGPT's anonymous per-user id (params._meta["openai/subject"]) when present, and by client IP otherwise,
 with a global cap on top so a traffic spike cannot run up the hosting bill.
 """
+import hashlib
 import json
 import logging
 import os
@@ -55,8 +56,16 @@ def _describe(body: bytes) -> str:
             parts.append(type(m).__name__)
             continue
         method = m.get("method") or ("response" if "result" in m or "error" in m else "?")
-        name = ((m.get("params") or {}).get("name") if isinstance(m.get("params"), dict) else None)
-        parts.append(f"{method}:{name}" if name else method)
+        params = m.get("params") if isinstance(m.get("params"), dict) else {}
+        name = params.get("name")
+        part = f"{method}:{name}" if name else method
+        if name:
+            # Which host features sent it (_meta keys only) and a short one-way digest of the arguments, so repeated
+            # identical calls (e.g. a second viewer) can be told apart from the model's or the viewer's own calls.
+            meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
+            digest = hashlib.sha256(json.dumps(params.get("arguments"), sort_keys=True).encode()).hexdigest()[:8]
+            part += f" args#{digest} meta=[{','.join(sorted(meta)[:8])}]"
+        parts.append(part)
     return ("batch " if isinstance(message, list) else "") + ",".join(parts)
 
 

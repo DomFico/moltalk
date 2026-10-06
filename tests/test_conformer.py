@@ -111,3 +111,17 @@ def test_macrocycle_lifts_in_place_despite_a_long_tail():
     xy = np.array([a["xy"] for a in model["atoms"]])[core]
     xyz = np.array([a["xyz"] for a in model["atoms"]])[core]
     assert np.linalg.norm(xyz[:, :2] - xy, axis=1).mean() < 0.3
+
+
+def test_metal_sits_in_a_square_cavity():
+    # The free-base ring left F430's cavity lopsided: Ni–N 1.78–2.44 Å. The donors are now restrained to a square.
+    import numpy as np
+    from rdkit import Chem
+    from moltalk import library
+    from moltalk.depiction import _chelated_metal
+    from moltalk.chemistry import conformer, depiction_mol
+    smiles = library.find_name("cofactor F430")[1]["smiles"]
+    metal, donors = _chelated_metal(depiction_mol(smiles)[0])
+    xyz = np.array([a["xyz"] for a in conformer(smiles, False)["atoms"]])
+    distances = [np.linalg.norm(xyz[metal] - xyz[n]) for n in donors]
+    assert max(distances) / min(distances) < 1.06

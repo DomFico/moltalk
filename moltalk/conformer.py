@@ -128,6 +128,39 @@ def _embed(heavy, conformers=8):
         return mol, _optimize(mol, "ETKDGv3")
 
 
+# Typical metal–N distances (Å) in tetrapyrrole complexes; the four N are restrained to the square these imply.
+METAL_N = {"Mg": 2.05, "Fe": 2.0, "Ni": 1.95, "Co": 1.95, "Zn": 2.05, "Cu": 2.0, "Mn": 2.0, "Pd": 2.0, "Pt": 2.0}
+
+
+def _square_cavity(mol, site, drawn_heavy, conf_id) -> bool:
+    """Free-base embedding leaves the ring's central cavity lopsided (F430: Ni–N 1.78–2.44 Å once the metal is put at
+    the centre). Re-optimise each conformer with the four donor N restrained to the square the metal needs
+    (cis N···N = d·√2, trans = 2d), so the metal ends up with four equal bonds."""
+    metal, donors = site
+    if len(donors) != 4:
+        return False
+    d = METAL_N.get(drawn_heavy.GetAtomWithIdx(metal).GetSymbol(), 2.0)
+    pos = mol.GetConformer(conf_id).GetPositions()
+    # Order the donors round the ring (by angle about their centroid) to tell cis from trans pairs.
+    centre = pos[donors].mean(axis=0)
+    u, _, vt = np.linalg.svd(pos[donors] - centre)
+    order = sorted(donors, key=lambda n: np.arctan2(*((pos[n] - centre) @ vt[:2].T)[::-1]))
+    pairs = [(order[k], order[(k + 1) % 4], d * np.sqrt(2)) for k in range(4)] + \
+            [(order[0], order[2], 2 * d), (order[1], order[3], 2 * d)]
+    use_mmff = AllChem.MMFFHasAllMoleculeParams(mol)
+    props = AllChem.MMFFGetMoleculeProperties(mol) if use_mmff else None
+    with rdBase.BlockLogs():
+        ff = (AllChem.MMFFGetMoleculeForceField(mol, props, confId=conf_id) if use_mmff
+              else AllChem.UFFGetMoleculeForceField(mol, confId=conf_id))
+        if ff is None:
+            return False
+        for a, b, length in pairs:
+            (ff.MMFFAddDistanceConstraint if use_mmff else ff.UFFAddDistanceConstraint)(
+                a, b, False, length - 0.02, length + 0.02, 500.0)
+        ff.Minimize(maxIts=1000)
+    return True
+
+
 def _extend_chains(mol, conf_id, min_chain=4):
     """A copy of mol whose conformer conf_id has every torsion along open sp3 carbon chains set to anti (180°) and
     is then force-field relaxed; None if there is no such chain of at least min_chain carbons."""
@@ -430,6 +463,10 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
         candidate = evaluate(straightened, best[1])
         if candidate[0][0] <= best[0][0] and candidate[0][2] < best[0][2]:
             best, mol = candidate, straightened
+    # Last, so no later unrestrained minimisation undoes it; only the chosen conformer, as it costs a minimisation.
+    if site and _square_cavity(mol, site, drawn_heavy, best[1]):
+        best = evaluate(mol, best[1])
+        method += ", N4 cavity fitted to the metal"
     (contradicted, _, rmsd), conf_id, xyz, raw, heavy_rot, heavy_scale, vsepr_lone = best
     frame_rot = heavy_rot
     to_heavy_frame = np.eye(3)

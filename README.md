@@ -21,7 +21,7 @@ moltalk  (.venv/bin/moltalk → RDKit worker processes with time/memory limits)
 | Install in an isolated venv (`.venv`, Python 3.12, RDKit 2026.03.6, mcp 1.30.0) | **Verified** |
 | Test suite: 106 tests (104 offline by default; 2 live PubChem tests need `MOLTALK_NETWORK_TESTS=1`), including live PubChem and real-browser tests of the drawing, its 3D rotation, zoom, hydrogens and a phone touch screen | **Verified** (`pytest`) |
 | Tools and widget through official MCP clients (Python SDK over stdio/HTTP, MCP Inspector CLI) | **Verified** |
-| UI resource metadata (`ui://widget/molecule-v20.html`, `text/html;profile=mcp-app`, `_meta.ui.resourceUri` + `openai/outputTemplate`) | **Verified** |
+| UI resource metadata (`ui://widget/molecule-v21.html`, `text/html;profile=mcp-app`, `_meta.ui.resourceUri` + `openai/outputTemplate`) | **Verified** |
 | Widget rendering in a sandboxed iframe through the MCP Apps bridge, plus a follow-up `tools/call` from the widget | **Verified** in Chrome with a host harness that imitates ChatGPT (`tests/test_widget_ui.py`, `tests/test_widget_3d.py`) |
 | tunnel-client → stdio server path | **Verified** with tunnel-client's local control plane (`scripts/local-tunnel-test.sh`) |
 | Name resolution: bundled library (22,038 compounds), OPSIN for systematic names, live PubChem fallback | **Verified** (`tests/test_library.py`; PubChem with `MOLTALK_NETWORK_TESTS=1`) |
@@ -119,7 +119,7 @@ The widget's **Hide/Show atom indices** button redraws the structure through a f
 | Start automatically at login (optional) | `systemctl --user enable moltalk-tunnel` |
 | Remove the service | `scripts/uninstall-service.sh`. To also remove the key and profile: `rm -r ~/.config/moltalk` |
 
-After changing tool metadata or the widget: restart (`scripts/start.sh`), then in ChatGPT open the plugin under **Plugins** → **Refresh**, and start a new chat. If you change the widget substantially, bump the version in its URI (`molecule-v20` → `v21`), because ChatGPT caches templates.
+After changing tool metadata or the widget: restart (`scripts/start.sh`), then in ChatGPT open the plugin under **Plugins** → **Refresh**, and start a new chat. If you change the widget substantially, bump the version in its URI (`molecule-v21` → `v22`), because ChatGPT caches templates.
 
 ### If the Tunnel option is unavailable
 
@@ -137,7 +137,7 @@ A public HTTPS endpoint is the documented alternative. ChatGPT accepts only **OA
 | `conformer_3d(smiles)` | viewer-only | one calculated 3D conformer aligned to the flat drawing, for rotating it (hidden from the model) |
 | `resolve_name(name, allow_network)` | no | structure from the bundled library, OPSIN or (opt-in) PubChem, with source, CID, title, IUPAC name, `stereo_summary` and warnings; ambiguous or unknown names are errors |
 
-**UI component.** `moltalk/widget/molecule.html` is registered as `ui://widget/molecule-v20.html` (`text/html;profile=mcp-app`) with an empty CSP allowlist, so it makes no network requests. It uses the MCP Apps bridge (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`, `ui/notifications/size-changed`) and falls back to `window.openai`. The SVG is sent only in the result's `_meta`, which ChatGPT passes to the widget but not to the model; the chemistry data stays in `structuredContent` for the model. The SVG is sanitized before insertion. Pass `include_svg=true` for clients without UI support.
+**UI component.** `moltalk/widget/molecule.html` is registered as `ui://widget/molecule-v21.html` (`text/html;profile=mcp-app`) with an empty CSP allowlist, so it makes no network requests. It uses the MCP Apps bridge (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`, `ui/notifications/size-changed`) and falls back to `window.openai`. The SVG is sent only in the result's `_meta`, which ChatGPT passes to the widget but not to the model; the chemistry data stays in `structuredContent` for the model. The SVG is sanitized before insertion. Pass `include_svg=true` for clients without UI support.
 
 **Rotate the drawing in 3D.** Grab the flat drawing and drag (one finger on a phone). Over the first ~90 px it lifts off the page into 3D and keeps rotating as a chemical drawing:
 - **Drawing style:** flat colour, implicit carbons, element labels with their hydrogens (OH/HO, NH₂) in RDKit's colours, half-coloured bonds, ring double bonds on the inner side, and gaps where a bond passes in front of another.
@@ -218,6 +218,8 @@ Rebuild the library with `.venv/bin/python scripts/build_library.py` (network, J
 **Cages.** In bridged or cage-like ring systems (bridgeheads, or atoms in three or more rings, as in cubane), an unspecified element counts only if its R/S differs among the stereoisomers that can actually be built in 3D. Each candidate is tried with a small ETKDG budget and two seeds, mirror images are added automatically, and the check is capped at 256 candidates. Substituted cubanes therefore report no stereocentres, while norbornan-2-ol (3) and camphor (2) keep theirs. The rotated view shows R/S only at real stereocentres.
 
 **Alignment with the drawing.** The 3D model is rotated onto the flat drawing by a robust weighted fit: atoms that cannot match, such as a long tail folded differently in 3D, are progressively down-weighted, so the rigid part decides the rotation. For metal chelates the macrocycle and the metal anchor the fit. Before this, chlorophyll's phytyl tail turned the ring 2–3 bond lengths away from the drawing, so lifting looked scrambled; its ring now starts within 0.12. Flexible arms still swing as the drawing lifts, because the model is one real conformer.
+
+**Metal–N cavity.** Embedding the ring as the free base leaves its central cavity lopsided (F430 had Ni–N of 1.78–2.44 Å once the metal was put at the centre). The chosen conformer is re-minimised with the four donor N restrained to the square the metal needs: cis N···N = d√2 and trans = 2d, with d = 2.05 Å for Mg, 2.0 Å for Fe and 1.95 Å for Ni. This is the last step, so no later minimisation undoes it. F430 now has Ni–N 1.93–1.99 Å, and chlorophyll Mg–N 2.05–2.09 Å. F430's ring stays ruffled, as in its crystal structures.
 
 **Long chains.** ETKDG makes long open chains crumpled, often folded back over the molecule. For the chosen conformer, every torsion along open sp³ carbon chains (four or more carbons) is set to anti, the extended zigzag the flat drawing also shows, and the force field relaxes it. The result is kept only if it matches the drawing better. Palmitic acid now lifts almost exactly onto its drawing. The rotated view is sized by the 90th-percentile atom distance, so chlorophyll's tail does not shrink the ring.
 
