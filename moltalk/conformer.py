@@ -195,6 +195,66 @@ def _extend_chains(mol, conf_id, min_chain=4):
     return out
 
 
+def _swing_tail(mol, conf_id, score, heavy_count, max_bonds=4, min_tail=6):
+    """A long chain hanging off a ring system (chlorophyll's phytyl ester) can leave the ring pointing back across
+    it. Scan the first few torsions of its attachment (60/180/300°, staggered), keep the clash-free combination that
+    best matches the flat drawing (where the chain points away), then relax. None if there is no such chain."""
+    from itertools import product
+    from rdkit.Chem import rdMolTransforms
+    ring_atoms = {a.GetIdx() for a in mol.GetAtoms() if a.IsInRing() and a.GetIdx() < heavy_count}
+    if not ring_atoms:
+        return None
+    dist = Chem.GetDistanceMatrix(mol)
+    # The heavy atom farthest (in bonds) from every ring atom ends the tail; walk from it back to the rings.
+    reach = {i: min(dist[i][r] for r in ring_atoms) for i in range(heavy_count)}
+    reach = {i: d for i, d in reach.items() if d < mol.GetNumAtoms()}  # a separate metal ion is not connected
+    far = max(reach, key=reach.get)
+    start = min(ring_atoms, key=lambda r: dist[far][r])
+    path = list(Chem.GetShortestPath(mol, start, far))
+    if len(path) - 1 < min_tail:
+        return None
+    torsions = []
+    for k in range(len(path) - 1):
+        b, c = path[k], path[k + 1]
+        bond = mol.GetBondBetweenAtoms(b, c)
+        if bond.GetBondType() != Chem.BondType.SINGLE or bond.IsInRing():
+            continue
+        a = next((n.GetIdx() for n in mol.GetAtomWithIdx(b).GetNeighbors() if n.GetIdx() != c and n.GetAtomicNum() > 1), None)
+        d = next((n.GetIdx() for n in mol.GetAtomWithIdx(c).GetNeighbors() if n.GetIdx() != b and n.GetAtomicNum() > 1), None)
+        if a is not None and d is not None:
+            torsions.append((a, b, c, d))
+        if len(torsions) == max_bonds:
+            break
+    if not torsions:
+        return None
+    topological = Chem.GetDistanceMatrix(mol)
+    pairs = np.argwhere(np.triu(topological[:heavy_count, :heavy_count] >= 4, 1))
+    best = None
+    for angles in product((60.0, 180.0, 300.0), repeat=len(torsions)):
+        trial = Chem.Mol(mol)
+        conf = trial.GetConformer(conf_id)
+        try:
+            for t, angle in zip(torsions, angles):
+                rdMolTransforms.SetDihedralDeg(conf, *t, angle)
+        except (RuntimeError, ValueError):
+            continue
+        pos = conf.GetPositions()
+        if len(pairs) and np.min(np.linalg.norm(pos[pairs[:, 0]] - pos[pairs[:, 1]], axis=1)) < 2.5:
+            continue  # heavy atoms four or more bonds apart closer than 2.5 Å: a clash
+        key = score(trial)[0]
+        if best is None or (key[0], key[2]) < best[0]:
+            best = ((key[0], key[2]), trial)
+    if best is None:
+        return None
+    out = best[1]
+    with rdBase.BlockLogs():
+        if AllChem.MMFFHasAllMoleculeParams(out):
+            AllChem.MMFFOptimizeMolecule(out, confId=conf_id, maxIters=300)
+        elif AllChem.UFFHasAllMoleculeParams(out):
+            AllChem.UFFOptimizeMolecule(out, confId=conf_id, maxIters=300)
+    return out
+
+
 def _fit(xyz, xy, weights, scale=None):
     """Proper rotation (no reflection, so R/S is preserved), scale and offsets that best lay 3D coordinates onto the
     flat drawing's 2D layout, by weighted least squares. Returns (transform, weighted RMS misfit)."""
@@ -463,6 +523,11 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
         candidate = evaluate(straightened, best[1])
         if candidate[0][0] <= best[0][0] and candidate[0][2] < best[0][2]:
             best, mol = candidate, straightened
+    unfolded = _swing_tail(mol, best[1], lambda m: evaluate(m, best[1]), heavy_count)
+    if unfolded is not None:
+        candidate = evaluate(unfolded, best[1])
+        if candidate[0][0] <= best[0][0] and candidate[0][2] < best[0][2]:
+            best, mol = candidate, unfolded
     # Last, so no later unrestrained minimisation undoes it; only the chosen conformer, as it costs a minimisation.
     if site and _square_cavity(mol, site, drawn_heavy, best[1]):
         best = evaluate(mol, best[1])

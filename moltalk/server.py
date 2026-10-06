@@ -1,9 +1,12 @@
 from importlib.resources import files
 from typing import Any
 import argparse
+import time
+import json
+import hashlib
 import os
 import httpx
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import Annotations, CallToolResult, EmbeddedResource, TextContent, TextResourceContents, ToolAnnotations
 from .chemistry import analyze, draw, conformer, substructure, enumerate_stereo
@@ -11,7 +14,7 @@ from .export import export_structure as write_structure, MAX_EMBED_BYTES
 from .limits import runner
 from .naming import name_and_locants, pubchem_slot
 
-WIDGET_URI = "ui://widget/molecule-v21.html"
+WIDGET_URI = "ui://widget/molecule-v22.html"
 WIDGET_MIME = "text/html;profile=mcp-app"
 WIDGET_HTML = files("moltalk").joinpath("widget/molecule.html").read_text(encoding="utf-8")
 
@@ -69,7 +72,7 @@ async def analyze_molecule(smiles: str) -> dict[str, Any]:
 @mcp.tool(annotations=READ_ONLY, meta=_ui_meta("Drawing molecule…", "Molecule drawn"))
 async def draw_molecule(smiles: str, label: str | None = None, width: int = 640, height: int = 420,
                         numbering: str = "iupac", atom_indices: bool = True, hydrogens: bool = False,
-                        include_svg: bool = False) -> CallToolResult:
+                        include_svg: bool = False, ctx: Context | None = None) -> CallToolResult:
     """Draw a molecule inline for the user from SMILES (RDKit 2D depiction with atom indices and R/S labels). Returns the full analysis and depicted_stereo_bonds (this drawing's wedges/dashes, each with an explanation). label is an optional display caption, e.g. the compound name. numbering: "iupac" (parent-chain/ring locants from the verified IUPAC name, when they can be determined without ambiguity; otherwise atom indices), "indices" or "none". hydrogens=true draws every hydrogen explicitly. include_svg=true also returns the raw SVG text (only for clients without the inline viewer)."""
     if numbering not in ("iupac", "indices", "none"):
         raise ValueError('numbering must be "iupac", "indices" or "none".')
@@ -87,12 +90,15 @@ async def draw_molecule(smiles: str, label: str | None = None, width: int = 640,
     for centre in result["analysis"]["stereocenters"]:
         if naming["locants"].get(str(centre["atom_index"])):
             centre["locant"] = naming["locants"][str(centre["atom_index"])]
+    repeated = _repeated_draw(ctx, [smiles, label, width, height, numbering, atom_indices, hydrogens, include_svg])
     structured = {"kind": "molecule", "label": label[:120] if label else None, "input_smiles": smiles,
                   "numbering_requested": numbering, "numbering_shown": shown, "atom_indices_shown": shown != "none",
                   "hydrogens_shown": hydrogens, "label_check": _check_label(label, checked["inchikey"]),
                   **naming, **result}
     if include_svg:
         structured["svg"] = svg
+    if repeated:
+        structured["repeat_of_previous"] = True  # the viewer shows a one-line note instead of a second copy
     centers = ", ".join((f"C{c['locant']} (atom {c['atom_index']})" if c.get("locant") else f"atom {c['atom_index']}") + f" {c['cip']}"
                         for c in a["stereocenters"]) or "none assigned"
     wedges = " ".join(b["explanation"] for b in result["depicted_stereo_bonds"]) or "no wedge/dash bonds in this drawing."
@@ -143,6 +149,26 @@ def _check_label(label: str | None, inchikey: str) -> dict | None:
                 "message": f"Same connectivity as {c['title']} (PubChem CID {c['cid']}), but different or unspecified stereochemistry."}
     return {"status": "matches", "library_cid": same[0]["cid"],
             "message": f"The structure matches {same[0]['title']} (PubChem CID {same[0]['cid']})."}
+
+_last_draw: dict[str, tuple[str, float]] = {}
+
+
+def _repeated_draw(ctx, args) -> bool:
+    """True when this ChatGPT session's previous draw_molecule had identical arguments, within 20 s. ChatGPT sometimes
+    re-sends the first tool call of a chat although the first one succeeded, which showed two identical viewers.
+    Only the immediately previous draw counts, so toggling a viewer setting back and forth is never collapsed."""
+    meta = getattr(getattr(ctx, "request_context", None), "meta", None) if ctx is not None else None
+    session = ((getattr(meta, "model_extra", None) or {}).get("openai/session")) if meta is not None else None
+    if not session:
+        return False
+    digest = hashlib.sha256(json.dumps(args, sort_keys=True, default=str).encode()).hexdigest()
+    now = time.monotonic()
+    previous = _last_draw.get(str(session))
+    _last_draw[str(session)] = (digest, now)
+    if len(_last_draw) > 5000:
+        for key in [k for k, (_, t) in _last_draw.items() if now - t > 60]:
+            _last_draw.pop(key, None)
+    return previous is not None and previous[0] == digest and now - previous[1] < 20
 
 @mcp.tool(annotations=READ_ONLY, meta={"ui": {"visibility": ["app"]}, "openai/widgetAccessible": True,
                                        "openai/visibility": "private"})

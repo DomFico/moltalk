@@ -19,6 +19,7 @@
   body { margin: 0; background: var(--bg); color: var(--fg);
          font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   html, body { overflow: hidden; }  /* the page itself never scrolls; only the details box below does */
+  :root[data-compact] main { min-height: 0; padding: 6px 16px; }
   main { padding: 26px 16px 14px; min-height: 280px; display: flex; flex-direction: column; max-height: var(--max-h, none); }
   main > .stage { flex: 0 0 auto; }
   .details { flex: 0 1 auto; min-height: 0; max-height: 132px; overflow-y: auto; margin-top: 8px; padding-right: 6px;
@@ -260,7 +261,8 @@
     // Inline only: in the viewer the host sizes us and the page is the window. Never report less than 280 px,
     // so a bad viewport during the fullscreen -> inline transition (a known iOS host issue) cannot collapse us.
     if (document.documentElement.dataset.mode === "viewer") return;
-    const height = Math.max(280, Math.ceil(root.getBoundingClientRect().height));
+    const floor = document.documentElement.dataset.compact ? 0 : 280;
+    const height = Math.max(floor, Math.ceil(root.getBoundingClientRect().height));
     notify("ui/notifications/size-changed", { height });
     if (window.openai && typeof window.openai.notifyIntrinsicHeight === "function") window.openai.notifyIntrinsicHeight(height);
   }
@@ -375,6 +377,10 @@
       renderIsomers(data, meta);
     } else if (data.kind === "file") {
       renderFile(data, meta, result);
+    } else if (data.repeat_of_previous) {
+      // ChatGPT sometimes re-sends the first draw of a chat; the drawing is already shown just above.
+      root.append(el("p", { class: "note" }, `Same drawing as above${data.label ? ` (${data.label})` : ""}.`));
+      document.documentElement.dataset.compact = "1";
     } else if (data.kind === "molecule" || data.analysis) {
       renderMolecule(data, meta);
     } else {
@@ -1212,7 +1218,7 @@
           for (const [off, shorten] of lines) {
             const cut = shorten * len;
             halves(x1 + nx * off + ux * cut, y1 + ny * off + uy * cut, x2 + nx * off - ux * cut, y2 + ny * off - uy * cut,
-                   a, b, 2, opacity);
+                   a, b, 2 * zoom, opacity);  // RDKit's 2-unit lines, shrunk with the model so they keep their weight
           }
           // E/Z beside the double bond, under the same Stereo setting as R/S.
           const ez = item.bond.cip && (item.bond.arbitrary ? stereoLabels === "all" : stereoLabels !== "off");

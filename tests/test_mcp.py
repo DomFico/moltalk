@@ -158,3 +158,20 @@ def test_pubchem_live():
     assert glucose['stereo_summary']['status'] == 'partially specified'
     with pytest.raises(ValueError, match='not found in MolTalk'):
         asyncio.run(resolve_name('not_a_real_chemical_xyz', allow_network=True))
+
+
+def test_identical_repeated_draw_in_a_session_is_collapsed():
+    # ChatGPT re-sent the first draw_molecule of a chat (same arguments, 10 s later); the repeat shows a one-line note.
+    from types import SimpleNamespace
+    from mcp.types import RequestParams
+    from moltalk.server import draw_molecule
+    ctx = lambda session: SimpleNamespace(request_context=SimpleNamespace(meta=RequestParams.Meta.model_validate({"openai/session": session})))
+    first = asyncio.run(draw_molecule("CCO", label="ethanol", ctx=ctx("s1")))
+    repeat = asyncio.run(draw_molecule("CCO", label="ethanol", ctx=ctx("s1")))
+    assert not first.structuredContent.get("repeat_of_previous") and repeat.structuredContent["repeat_of_previous"]
+    assert repeat.content[0].text == first.content[0].text  # the model still gets the full result
+    # A different session, or a viewer toggling a setting back and forth, is never collapsed.
+    assert not asyncio.run(draw_molecule("CCO", label="ethanol", ctx=ctx("s2"))).structuredContent.get("repeat_of_previous")
+    asyncio.run(draw_molecule("CCO", label="ethanol", hydrogens=True, ctx=ctx("s3")))
+    asyncio.run(draw_molecule("CCO", label="ethanol", ctx=ctx("s3")))
+    assert not asyncio.run(draw_molecule("CCO", label="ethanol", hydrogens=True, ctx=ctx("s3"))).structuredContent.get("repeat_of_previous")
