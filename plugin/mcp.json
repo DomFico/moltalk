@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "moltalk": {
+      "type": "streamable-http",
+      "url": "https://moltalk-411294000488.us-central1.run.app/mcp"
+    }
+  }
+}

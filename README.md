@@ -299,6 +299,12 @@ Names are resolved as described under *Name resolution*. Library and PubChem rec
 
 Sources: [OpenAI plugins: connect and test](https://developers.openai.com/plugins/deploy/connect-chatgpt), [Add UI to your MCP server](https://developers.openai.com/plugins/build/chatgpt-ui), [Plugins reference](https://developers.openai.com/plugins/reference), [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), [Developer mode](https://developers.openai.com/api/docs/guides/developer-mode), [openai/tunnel-client](https://github.com/openai/tunnel-client), [RDKit](https://www.rdkit.org/docs/), [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk).
 
+## Plugin package and logo
+
+`plugin/` is the portable plugin package: `plugin.json` (branding under `extensions.com.openai.interface`: name, descriptions, `logo` and `composerIcon`), `mcp.json` (the Cloud Run MCP URL) and `assets/moltalk-logo.png` (512×512 PNG, the logo with thicker lines on a white rounded square, so it stays legible at 48 px and on dark themes). Build the upload with `cd plugin && zip -r ../dist/moltalk-plugin.zip .`. Logo and metadata change only when the package is re-uploaded; redeploying the server does not update them.
+
+The server also advertises the icon itself: `serverInfo.icons` (a 128 px data URI, so it works over stdio and HTTP) and, on Cloud Run, `/logo.png` and `/favicon.ico`, for hosts that use the connector's site icon. The original transparent logo is `assets/logo.svg`; the README banner is `assets/banner.svg`.
+
 ## License
 
 MolTalk is open source under the [MIT License](LICENSE).

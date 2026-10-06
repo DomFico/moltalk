@@ -8,7 +8,7 @@ import os
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import Annotations, CallToolResult, EmbeddedResource, TextContent, TextResourceContents, ToolAnnotations
+from mcp.types import Annotations, Icon, CallToolResult, EmbeddedResource, TextContent, TextResourceContents, ToolAnnotations
 from .chemistry import analyze, draw, conformer, substructure, enumerate_stereo
 from .export import export_structure as write_structure, MAX_EMBED_BYTES
 from .limits import runner
@@ -46,7 +46,12 @@ SECURITY = TransportSecuritySettings(enable_dns_rebinding_protection=True,
                                      allowed_hosts=_env_list("MOLTALK_ALLOWED_HOSTS", LOCAL_HOSTS),
                                      allowed_origins=_env_list("MOLTALK_ALLOWED_ORIGINS", LOCAL_ORIGINS))
 
-mcp = FastMCP("MolTalk", instructions=INSTRUCTIONS, host=HOST, port=PORT,
+# The MolTalk logo (a dodecahedrane drawn by MolTalk's own 3D view), advertised in serverInfo.icons so hosts can
+# show it next to the app's name. Embedded as a data URI, so it works over stdio and HTTP alike.
+_ICON_128 = "data:image/png;base64," + __import__("base64").b64encode(files("moltalk").joinpath("static/icon-128.png").read_bytes()).decode()
+ICONS = [Icon(src=_ICON_128, mimeType="image/png", sizes=["128x128"])]
+
+mcp = FastMCP("MolTalk", instructions=INSTRUCTIONS, icons=ICONS, website_url="https://github.com/DomFico/moltalk", host=HOST, port=PORT,
               stateless_http=True, json_response=True, transport_security=SECURITY,
               max_request_body_size=int(os.getenv("MOLTALK_MAX_BODY_BYTES", "65536")))
 

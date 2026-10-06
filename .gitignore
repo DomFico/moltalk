@@ -5,3 +5,6 @@ __pycache__/
 # downloaded by scripts/fetch-tools.sh (checksum-verified), not committed
 vendor/*.jar
 tools/
+
+# built plugin package (scripts or: cd plugin && zip -r ../dist/moltalk-plugin.zip .)
+dist/

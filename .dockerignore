@@ -8,3 +8,5 @@ tools
 vendor
 examples
 assets
+plugin
+dist

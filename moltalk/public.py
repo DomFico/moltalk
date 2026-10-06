@@ -82,6 +82,11 @@ def _subject(body: bytes) -> str | None:
     return None
 
 
+def _icon_bytes() -> bytes:
+    from importlib.resources import files
+    return files("moltalk").joinpath("static/icon-512.png").read_bytes()
+
+
 async def _send_plain(send, status: int, text: str, content_type: bytes = b"text/plain; charset=utf-8"):
     body = text.encode()
     await send({"type": "http.response.start", "status": status,
@@ -102,6 +107,13 @@ class PublicGateway:
         path = scope.get("path", "")
         if path == "/health":  # Cloud Run reserves /healthz
             return await _send_plain(send, 200, "ok")
+        if path in ("/logo.png", "/favicon.ico", "/favicon.png", "/apple-touch-icon.png"):
+            # The app icon, for hosts that look for a site icon (connector lists show the domain's favicon).
+            body = _icon_bytes()
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"image/png"), (b"content-length", str(len(body)).encode()),
+                                    (b"cache-control", b"public, max-age=86400")]})
+            return await send({"type": "http.response.body", "body": body})
         if path == "/.well-known/openai-apps-challenge":
             return await _send_plain(send, 200, CHALLENGE) if CHALLENGE else await _send_plain(send, 404, "not configured")
         if scope.get("method") != "POST":

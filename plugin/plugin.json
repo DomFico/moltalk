@@ -1,0 +1,21 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "moltalk",
+  "version": "1.0.0",
+  "description": "Draw, rotate and name organic molecules with RDKit: verified names, IUPAC numbering, R/S and E/Z, lone pairs, a ChemDraw-style 3D view, and ChemDraw/MOL/SDF export.",
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "MolTalk",
+        "shortDescription": "Draw & rotate molecules",
+        "longDescription": "Ask about any molecule and MolTalk draws it inline: a clean 2D structure you can grab and rotate in 3D, with verified names (bundled library, OPSIN, PubChem), IUPAC numbering, R/S and E/Z labels, lone pairs, and export to SVG/PNG or ChemDraw, MOL, SDF, PDB and XYZ files. It never guesses a structure: unknown or ambiguous names are reported, not invented.",
+        "category": "Education",
+        "developerName": "Dominic Fico",
+        "websiteURL": "https://github.com/DomFico/moltalk",
+        "brandColor": "#0B6BCB",
+        "logo": "./assets/moltalk-logo.png",
+        "composerIcon": "./assets/moltalk-logo.png"
+      }
+    }
+  }
+}

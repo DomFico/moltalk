@@ -16,7 +16,7 @@ moltalk = "moltalk.server:main"
 [tool.setuptools.packages.find]
 include = ["moltalk*"]
 [tool.setuptools.package-data]
-moltalk = ["widget/*.html", "data/*.json.gz"]
+moltalk = ["widget/*.html", "data/*.json.gz", "static/*.png"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["network: needs live PubChem access (set MOLTALK_NETWORK_TESTS=1)"]
