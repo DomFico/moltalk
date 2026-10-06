@@ -45,3 +45,24 @@ def test_hydroporphyrins_get_the_textbook_square():
         depiction = draw(library.find_name(name)[1]["smiles"], 640, 420, False)["depiction"]
         assert depiction["bond_crossings"] == 0 and depiction["overlapping_atoms"] == 0, name
         assert depiction["max_bond_length_ratio"] <= 1.6, (name, depiction)
+
+
+def test_layout_does_not_depend_on_how_the_smiles_is_written():
+    # The model draws resolve_name's canonical SMILES; with that atom order the porphyrin pin was rejected (a methyl
+    # ester on the fused ring collided with a side chain) and chlorophyll came out round with Mg–N stretched 2.6x.
+    from moltalk import library
+    from moltalk.chemistry import analyze, draw
+    for name in ("chlorophyll a", "cofactor F430", "heme"):
+        smiles = library.find_name(name)[1]["smiles"]
+        for written in (smiles, analyze(smiles)["canonical_smiles"]):
+            depiction = draw(written, 640, 420, False)["depiction"]
+            assert depiction["bond_crossings"] == 0 and depiction["max_bond_length_ratio"] <= 1.6, (name, written)
+
+
+def test_hydrogens_never_trigger_the_cage_fallback():
+    # FAD with explicit hydrogens had a few overlaps, and the Schlegel fallback (meant for C60-like cages) took over.
+    from moltalk import library
+    from moltalk.chemistry import analyze, draw
+    smiles = analyze(library.find_name("FAD")[1]["smiles"])["canonical_smiles"]
+    depiction = draw(smiles, 640, 420, False, True)["depiction"]
+    assert depiction["method"] == "rdkit" and depiction["max_bond_length_ratio"] <= 1.2

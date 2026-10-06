@@ -222,10 +222,10 @@ def _pin_porphyrinoid(ligand) -> bool:
         for j, a in enumerate(run, start=1):
             angle = a0 + direction * total * j / steps
             coords[a] = centre + r * np.array([np.cos(angle), np.sin(angle)])
-    # Substituents on the core point out of the macrocycle (its middle is where the metal and its bonds go): put a
-    # core atom's one unplaced, acyclic neighbour in its widest outward-facing gap.
+    # Substituents on the core and its fused rings point out of the macrocycle (its middle is where the metal and its
+    # bonds go): put a placed atom's one unplaced, acyclic neighbour in its widest outward-facing gap.
     middle = template.mean(axis=0)
-    for a in match:
+    for a in list(coords):  # core atoms and the atoms of fused rings placed above
         nbrs = [n.GetIdx() for n in ligand.GetAtomWithIdx(a).GetNeighbors()]
         free = [n for n in nbrs if n not in coords]
         if len(free) != 1 or ligand.GetAtomWithIdx(free[0]).IsInRing():
@@ -257,7 +257,38 @@ def _pin_porphyrinoid(ligand) -> bool:
 
 
 def layout(mol) -> dict:
-    """Compute 2D coordinates in place; returns how they were made and how good they are."""
+    """Compute 2D coordinates in place; returns how they were made and how good they are.
+    With explicit hydrogens, the heavy-atom skeleton is laid out first (with every fix below) and the hydrogens are
+    then placed around it, so the drawing with hydrogens has the same skeleton as the one without. Laying out all
+    atoms at once gave a different, sometimes overlapping layout, which then wrongly triggered the cage fallback."""
+    hydrogens = [a.GetIdx() for a in mol.GetAtoms() if a.GetAtomicNum() == 1]
+    if hydrogens and len(hydrogens) < mol.GetNumAtoms():
+        heavy_ids = [a.GetIdx() for a in mol.GetAtoms() if a.GetAtomicNum() != 1]
+        skeleton = Chem.RWMol(mol)
+        for i in sorted(hydrogens, reverse=True):
+            skeleton.RemoveAtom(i)
+        skeleton = skeleton.GetMol()
+        skeleton.UpdatePropertyCache(strict=False)
+        Chem.GetSymmSSSR(skeleton)  # removing atoms clears the ring information the layout code relies on
+        result = layout(skeleton)
+        conf = skeleton.GetConformer()
+        coord_map = {heavy_ids[k]: Point2D(conf.GetAtomPosition(k).x, conf.GetAtomPosition(k).y) for k in range(len(heavy_ids))}
+        with rdBase.BlockLogs():
+            rdDepictor.Compute2DCoords(mol, coordMap=coord_map)
+        placed = quality(mol)
+        # RDKit's own all-at-once layout is sometimes tidier for small molecules (glucose's ring hydrogens); keep it
+        # only when it has strictly fewer crossings, overlaps and stretched bonds (and the skeleton needed no fix-up).
+        if result["method"] == "rdkit" and not _chelated_metal(skeleton):
+            whole = Chem.Mol(mol)
+            with rdBase.BlockLogs():
+                rdDepictor.Compute2DCoords(whole)
+            alone = quality(whole)
+            problems = lambda q: q["bond_crossings"] + q["overlapping_atoms"] + q["stretched_bonds"]
+            if problems(alone) < problems(placed):
+                mol.RemoveAllConformers()
+                mol.AddConformer(Chem.Conformer(whole.GetConformer()), assignId=True)
+                placed = alone
+        return {**result, **placed}
     chelate = _chelated_metal(mol)
     if chelate:
         # RDKit cannot fit the metal's four bonds into the macrocycle layout. Lay out the ligand alone (a tidy
@@ -282,6 +313,12 @@ def layout(mol) -> dict:
     best_q = quality(mol)
     result = {"method": "rdkit", **best_q}
     if not (best_q["bond_crossings"] or best_q["stretched_bonds"] or best_q["overlapping_atoms"]):
+        return result
+    # Schlegel diagrams are for polyhedral cages (C60, cubane, dodecahedrane), whose atoms sit in three or more rings.
+    # A merely crowded ordinary layout (FAD with hydrogens) must never be swapped for one.
+    Chem.GetSymmSSSR(mol)  # make sure ring information exists (it may have been cleared by editing the molecule)
+    ring_info = mol.GetRingInfo()
+    if not any(ring_info.NumAtomRings(a.GetIdx()) >= 3 for a in mol.GetAtoms()):
         return result
     best_conf = Chem.Conformer(mol.GetConformer())
     core_bond_length = 1.5
