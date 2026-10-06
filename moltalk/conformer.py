@@ -11,15 +11,16 @@ from rdkit import Chem
 from rdkit.Chem import AllChem, rdBase, rdCIPLabeler
 from rdkit.Geometry import Point3D
 from .depiction import _cage, layout
-from .stereo import stereogenic_unspecified, organic_stereo
+from .stereo import stereogenic_unspecified, organic_stereo, assign_cip
 from .coordination import is_metal
 from .depiction import _chelated_metal
 
 EMBED_TIMEOUT_S = 5
 CANDIDATE_CONFORMERS = (8, 32)  # try more only if no conformer agrees with the flat wedges
 SINGLE_TIMEOUT_S = 10  # last resort: one conformer, when several could not be made in time (big chelates on a slow CPU)
-FIT_RETRY_MAX_ATOMS = 30
+FIT_RETRY_MAX_ATOMS = 15
 LARGE_ATOMS = 50
+LARGE_CANDIDATES = 2
 GOOD_FIT = 0.15  # weighted RMSD (bond-length units) below which a conformer already lifts smoothly from the drawing
 RETRY_BUDGET_S = 1.5  # ...and only if the first round was quick
 
@@ -53,12 +54,14 @@ def _spectral_sphere(mol, cage, bond_length=1.42):
 
 
 def _optimize(mol, method):
-    """Force-field clean-up of every conformer on mol."""
+    """Force-field clean-up of every conformer on mol. Large molecules get a shorter clean-up: ETKDG geometry is
+    already reasonable, and the viewer needs a picture, not an energy minimum (chlorophyll: 1.7 s of MMFF)."""
+    iterations = 300 if mol.GetNumHeavyAtoms() > LARGE_ATOMS else 1000
     if AllChem.MMFFHasAllMoleculeParams(mol):
-        AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=1000)
+        AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=iterations)
         return method + " + MMFF94"
     if AllChem.UFFHasAllMoleculeParams(mol):
-        AllChem.UFFOptimizeMoleculeConfs(mol, maxIters=1000)
+        AllChem.UFFOptimizeMoleculeConfs(mol, maxIters=iterations)
         return method + " + UFF"
     return method
 
@@ -500,9 +503,10 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
 
     best = mol = method = None
     started = time.monotonic()
-    for count in CANDIDATE_CONFORMERS:
-        if heavy_count > LARGE_ATOMS:
-            count = max(1, count // 2)  # chlorophyll: embedding and optimising 8 conformers took 7 s on a desktop
+    # Large molecules (chlorophyll) get one round of a few candidates: each embedding costs ~0.5 s on a desktop and
+    # ~1.5 s on Cloud Run, and the refinements below (robust alignment, tail swing, cavity fit) do the shaping.
+    rounds = (LARGE_CANDIDATES,) if heavy_count > LARGE_ATOMS else CANDIDATE_CONFORMERS
+    for count in rounds:
         if best is not None and time.monotonic() - started > RETRY_BUDGET_S:
             break  # a big, slow molecule (erythromycin): more conformers would mostly time out
         try:
@@ -554,7 +558,6 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
         to_heavy_frame = heavy_rot @ h_rot.T
         frame_rot = h_rot
     Chem.AssignStereochemistryFrom3D(mol, confId=conf_id)
-    rdCIPLabeler.AssignCIPLabels(mol)
 
     real = stereogenic_unspecified(mol_in, potential)
     unspecified = sorted(i for kind, i in real if kind == "atom")
@@ -564,6 +567,11 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     stereocentres |= set(unspecified)
     unspecified_bonds = [[mol_in.GetBondWithIdx(i).GetBeginAtomIdx(), mol_in.GetBondWithIdx(i).GetEndAtomIdx()]
                          for kind, i in real if kind == "bond"]
+    # Label only what is shown: the unbounded labeller never finished on dodecahedrane's 3D model (20 tagged centres
+    # in a highly symmetric cage, none of them real stereocentres).
+    open_pairs = [mol.GetBondBetweenAtoms(a, b) for a, b in unspecified_bonds]
+    assign_cip(mol, atoms=sorted(i for i in stereocentres if i < heavy_count),
+               bonds=[bd.GetIdx() for bd in open_pairs if bd is not None])
 
     open_bonds = [sorted(pair) for pair in unspecified_bonds]
     kekule = Chem.Mol(drawn)

@@ -125,3 +125,14 @@ def test_metal_sits_in_a_square_cavity():
     xyz = np.array([a["xyz"] for a in conformer(smiles, False)["atoms"]])
     distances = [np.linalg.norm(xyz[metal] - xyz[n]) for n in donors]
     assert max(distances) / min(distances) < 1.06
+
+
+def test_symmetric_cage_3d_does_not_hang():
+    # RDKit's unbounded CIP labeller never finished on dodecahedrane's 3D model (20 tagged cage carbons); only real
+    # stereocentres are labelled now, with an iteration cap.
+    import time
+    from test_depiction import DODECAHEDRANE
+    from moltalk.chemistry import conformer
+    started = time.monotonic()
+    model = conformer(DODECAHEDRANE, True)
+    assert time.monotonic() - started < 10 and not any(a.get("cip") for a in model["atoms"])

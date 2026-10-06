@@ -21,6 +21,22 @@ def _canonical(mol) -> str:
     return Chem.MolToSmiles(mol, isomericSmiles=True)
 
 
+CIP_MAX_ITERATIONS = 2_500_000  # about 2 s; RDKit: most structures need under 10,000
+
+
+def assign_cip(mol, atoms=None, bonds=None) -> bool:
+    """RDKit's CIP labeller, bounded. On a highly symmetric cage with many tagged centres (dodecahedrane's 3D model
+    has 20) the unbounded labeller effectively never finishes; it is limited to the atoms and bonds actually needed
+    and to CIP_MAX_ITERATIONS, and a structure that exceeds it simply gets no labels. False if it gave up."""
+    if atoms is not None and bonds is not None and not atoms and not bonds:
+        return True
+    try:
+        rdCIPLabeler.AssignCIPLabels(mol, atomsToLabel=atoms, bondsToLabel=bonds, maxRecursiveIterations=CIP_MAX_ITERATIONS)
+        return True
+    except Exception:  # noqa: BLE001 - MaxIterationsExceeded and friends: leave unlabelled rather than hang
+        return False
+
+
 def organic_stereo(mol, potential) -> list:
     """Potential stereo elements without metal centres: a four-coordinate metal (e.g. square-planar Fe in heme)
     is not a tetrahedral stereocentre, although RDKit lists it as one."""
@@ -67,7 +83,7 @@ def _cage_filter(mol, real):
     labels = {}
     for iso in isomers:
         Chem.AssignStereochemistry(iso, cleanIt=True, force=True)
-        rdCIPLabeler.AssignCIPLabels(iso)
+        assign_cip(iso)
         for kind, i in real:
             item = iso.GetAtomWithIdx(i) if kind == "atom" else iso.GetBondWithIdx(i) if kind == "bond" else None
             value = item.GetProp("_CIPCode") if item is not None and item.HasProp("_CIPCode") else None

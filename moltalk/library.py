@@ -12,7 +12,7 @@ from functools import lru_cache
 from importlib.resources import files
 
 from rdkit import Chem
-from rdkit.Chem import rdCIPLabeler
+from .stereo import assign_cip
 
 DATA = files("moltalk").joinpath("data/compounds.json.gz")
 # A stereo qualifier in front of a name: L-, D-, DL-, rac-, meso-, cis-, trans-, (+)-, (-)-, (±)-, (R)-, (2S,3R)-, (E)-...
@@ -126,7 +126,7 @@ def locants_for(smiles: str, compound: dict):
                       else "the parent chain or ring of the name could not be identified unambiguously")
     mol = Chem.MolFromSmiles(smiles)
     ref = Chem.MolFromSmiles(compound["smiles"])
-    rdCIPLabeler.AssignCIPLabels(mol)
+    assign_cip(mol)
     parent = {int(k): v for k, v in compound["locants"].items()}
     found = _map_locants(mol, ref, parent, _stereo_descriptors(compound["iupac"]))
     if not found:

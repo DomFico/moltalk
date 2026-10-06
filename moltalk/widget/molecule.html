@@ -131,7 +131,7 @@
   const conformers = new Map();
   const views = new Map();
   let liftSnapshot = null;
-  let stereoLabels = "specified";  // "specified" | "all" | "off"; survives redraws like the lone-pair setting
+  let stereoLabels = "off";  // clean drawing by default; the viewer's Stereo control turns labels on  // "specified" | "all" | "off"; survives redraws like the lone-pair setting
   let hostCaps = {};
   let showLonePairs = false;  // survives redraws (hydrogens, numbering)  // per molecule: rotation, lift, zoom and pan survive redraws (hydrogens, atom numbers)
 

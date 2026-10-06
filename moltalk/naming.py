@@ -280,9 +280,9 @@ def _map_locants(mol, ref, parent, descriptors):
 
 def locants_from_cml(smiles: str, name: str, cml: str):
     """Pure RDKit work (runs in the worker pool): ({atom index: locant}, None) or (None, reason)."""
-    from rdkit.Chem import rdCIPLabeler
+    from .stereo import assign_cip
     mol = Chem.MolFromSmiles(smiles)
-    rdCIPLabeler.AssignCIPLabels(mol)
+    assign_cip(mol)
     ref, labels = _cml_molecule(cml)
     if not _same(ref, mol):
         return None, "the name's structure does not match"

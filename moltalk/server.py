@@ -14,7 +14,7 @@ from .export import export_structure as write_structure, MAX_EMBED_BYTES
 from .limits import runner
 from .naming import name_and_locants, pubchem_slot
 
-WIDGET_URI = "ui://widget/molecule-v24.html"
+WIDGET_URI = "ui://widget/molecule-v25.html"
 WIDGET_MIME = "text/html;profile=mcp-app"
 WIDGET_HTML = files("moltalk").joinpath("widget/molecule.html").read_text(encoding="utf-8")
 
@@ -71,9 +71,9 @@ async def analyze_molecule(smiles: str) -> dict[str, Any]:
 
 @mcp.tool(annotations=READ_ONLY, meta=_ui_meta("Drawing molecule…", "Molecule drawn"))
 async def draw_molecule(smiles: str, label: str | None = None, width: int = 640, height: int = 420,
-                        numbering: str = "iupac", atom_indices: bool = True, hydrogens: bool = False,
+                        numbering: str = "none", atom_indices: bool = True, hydrogens: bool = False,
                         include_svg: bool = False, ctx: Context | None = None) -> CallToolResult:
-    """Draw and render a molecule inline for the user from SMILES, in a single call. A successful result (rendered: true) means the drawing is already displayed to the user: do not call draw_molecule again with the same arguments to verify, inspect, retrieve or display it; read structuredContent instead. For a compound name, use draw_named_molecule. Returns the full analysis and depicted_stereo_bonds (this drawing's wedges/dashes, each with an explanation). label: display caption, e.g. the compound name. numbering: "iupac" (parent-chain/ring locants from the verified IUPAC name, when they can be determined without ambiguity; otherwise atom indices), "indices" or "none". hydrogens=true draws every hydrogen explicitly. include_svg=true also returns the raw SVG text (only for clients without the inline viewer)."""
+    """Draw and render a molecule inline for the user from SMILES, in a single call. A successful result (rendered: true) means the drawing is already displayed to the user: do not call draw_molecule again with the same arguments to verify, inspect, retrieve or display it; read structuredContent instead. For a compound name, use draw_named_molecule. Returns the full analysis and depicted_stereo_bonds (this drawing's wedges/dashes, each with an explanation). label: display caption, e.g. the compound name. numbering (default "none": a clean drawing; the user can switch numbers on in the viewer): "iupac" (parent-chain/ring locants from the verified IUPAC name, when they can be determined without ambiguity; otherwise atom indices), "indices" or "none". Ask for numbers only when the discussion needs them. hydrogens=true draws every hydrogen explicitly. include_svg=true also returns the raw SVG text (only for clients without the inline viewer)."""
     if numbering not in ("iupac", "indices", "none"):
         raise ValueError('numbering must be "iupac", "indices" or "none".')
     if not atom_indices:
@@ -153,7 +153,7 @@ def _check_label(label: str | None, inchikey: str) -> dict | None:
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True),
           meta=_ui_meta("Drawing molecule…", "Molecule drawn"))
-async def draw_named_molecule(name: str, numbering: str = "iupac", hydrogens: bool = False, allow_network: bool = False,
+async def draw_named_molecule(name: str, numbering: str = "none", hydrogens: bool = False, allow_network: bool = False,
                               ctx: Context | None = None) -> CallToolResult:
     """Use this when the user asks to draw a molecule by name ("draw cubane", "show me FAD"): it resolves the name and renders the drawing inline in one call. Do not call resolve_name first, and do not call draw_molecule afterwards unless the user asks for a modified structure. A successful result (rendered: true) is already displayed; never call again to verify it. Resolution is the same as resolve_name (MolTalk's library, then OPSIN for systematic names, then PubChem only if allow_network=true); an ambiguous or unknown name, or one that does not say which stereoisomer, is an error and nothing is drawn. numbering and hydrogens are as in draw_molecule."""
     resolved = await resolve_name(name, allow_network)

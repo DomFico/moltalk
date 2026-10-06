@@ -90,10 +90,10 @@ def test_widget_renders_and_calls_tools():
 
                 # 2. Follow-up tool call from inside the widget (toggle atom indices).
                 svg_before = await frame.locator(".canvas").inner_html()
-                await frame.get_by_role("group", name="Atom numbers").get_by_role("button", name="Off", exact=True).click()
-                await frame.get_by_role("group", name="Atom numbers").get_by_role("button", name="Off", exact=True).and_(frame.locator("[aria-pressed=true]")).wait_for()
-                assert tool_calls[-1] == {"name": "draw_molecule", "arguments": {**args, "atom_indices": True, "numbering": "iupac",
-                                                                                     "hydrogens": False, "numbering": "none"}}
+                await frame.get_by_role("group", name="Atom numbers").get_by_role("button", name="Index", exact=True).click()
+                await frame.get_by_role("group", name="Atom numbers").get_by_role("button", name="Index", exact=True).and_(frame.locator("[aria-pressed=true]")).wait_for()
+                assert tool_calls[-1] == {"name": "draw_molecule", "arguments": {**args, "atom_indices": True,
+                                                                                     "hydrogens": False, "numbering": "indices"}}
                 assert await frame.locator(".canvas").inner_html() != svg_before
 
                 # 2b. Cage: drawn as a view of its 3D shape, with its explanatory note.

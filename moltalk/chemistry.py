@@ -4,7 +4,7 @@ from rdkit.Chem.Draw import rdMolDraw2D
 from rdkit.Chem.EnumerateStereoisomers import EnumerateStereoisomers, StereoEnumerationOptions
 from .depiction import layout
 from .conformer import conformer_3d
-from .stereo import stereogenic_unspecified, organic_stereo
+from .stereo import stereogenic_unspecified, organic_stereo, assign_cip
 from .coordination import coordinate, normalize_coordination, is_metal
 
 GROUPS = {"alcohol": "[OX2H][CX4]", "phenol": "[OX2H]c", "carboxylic acid": "[CX3](=O)[OX2H]",
@@ -25,7 +25,7 @@ def parse(smiles: str):
     if mol.GetNumAtoms() > 256:
         raise ValueError("V1 supports at most 256 atoms per molecule.")
     Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
-    rdCIPLabeler.AssignCIPLabels(mol)
+    assign_cip(mol)
     return mol
 
 def _parse_error(smiles: str) -> str:
@@ -254,7 +254,7 @@ def enumerate_stereo(smiles: str, limit: int = 16, with_drawings: bool = False) 
     for i, smi in enumerate(values[:limit]):
         mol = found[smi]
         Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
-        rdCIPLabeler.AssignCIPLabels(mol)
+        assign_cip(mol)
         mirror = _mirror_smiles(mol)
         isomers.append({"index": i, "smiles": smi, "inchikey": Chem.MolToInchiKey(mol),
                         "stereocenters": [{"atom_index": a.GetIdx(), "element": a.GetSymbol(), "cip": a.GetProp('_CIPCode')}

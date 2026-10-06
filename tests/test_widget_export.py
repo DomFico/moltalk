@@ -64,6 +64,8 @@ def test_stereo_labels_and_exports():
                 visible = """() => [...document.querySelectorAll('.liftable > svg:not(.lift) .CIP_Code')]
                                  .filter(n => n.style.display !== 'none').length"""
                 inner = page.frames[1]
+                assert await inner.evaluate(visible) == 0  # clean drawing by default: no stereo labels
+                await stereo.get_by_role("button", name="Specified").click()
                 assert await inner.evaluate(visible) == 3  # "(S)" only; the open centre's "(?)" is hidden
                 await stereo.get_by_role("button", name="All").click()
                 assert await inner.evaluate(visible) == 6  # plus "(?)", placed by RDKit like any stereo label
