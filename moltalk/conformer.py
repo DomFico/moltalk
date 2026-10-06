@@ -131,18 +131,28 @@ def _embed(heavy, conformers=8):
 def _fit(xyz, xy, weights, scale=None):
     """Proper rotation (no reflection, so R/S is preserved), scale and offsets that best lay 3D coordinates onto the
     flat drawing's 2D layout, by weighted least squares. Returns (transform, weighted RMS misfit)."""
-    w = np.asarray(weights, dtype=float)[:, None]
-    p0, q0 = (w * xyz).sum(0) / w.sum(), (w * xy).sum(0) / w.sum()
-    p = xyz - p0
-    q = np.column_stack([xy - q0, np.zeros(len(xy))])
-    u, _, vt = np.linalg.svd((w * p).T @ q)
-    d = np.sign(np.linalg.det(vt.T @ u.T)) or 1.0
-    rot = vt.T @ np.diag([1, 1, d]) @ u.T
-    aligned = p @ rot.T
-    if scale is None:  # fit the scale too, unless a fixed one is given
-        scale = float(np.sum(w * aligned[:, :2] * q[:, :2]) / max(np.sum(w * aligned[:, :2] ** 2), 1e-9))
-    aligned *= scale
-    rmsd = float(np.sqrt((w[:, 0] * np.sum((aligned[:, :2] - q[:, :2]) ** 2, axis=1)).sum() / w.sum()))
+    base = np.asarray(weights, dtype=float)
+    w = base[:, None]
+    fixed = scale
+    # Robust (iteratively reweighted) fit: atoms that cannot match the drawing, such as a long flexible tail folded
+    # differently in 3D, are down-weighted, so the rigid part decides the rotation. Plain least squares let
+    # chlorophyll's phytyl tail (15% of the weight, but residuals ~10x larger) turn the macrocycle away from the
+    # drawing: 1.8-3.5 misfit, against 0.14 for the ring alone.
+    for _ in range(5):
+        p0, q0 = (w * xyz).sum(0) / w.sum(), (w * xy).sum(0) / w.sum()
+        p = xyz - p0
+        q = np.column_stack([xy - q0, np.zeros(len(xy))])
+        u, _, vt = np.linalg.svd((w * p).T @ q)
+        d = np.sign(np.linalg.det(vt.T @ u.T)) or 1.0
+        rot = vt.T @ np.diag([1, 1, d]) @ u.T
+        aligned = p @ rot.T
+        scale = fixed if fixed is not None else \
+            float(np.sum(w * aligned[:, :2] * q[:, :2]) / max(np.sum(w * aligned[:, :2] ** 2), 1e-9))
+        aligned *= scale
+        residual = np.linalg.norm(aligned[:, :2] - q[:, :2], axis=1)
+        c = max(0.5, 2.0 * float(np.median(residual)))
+        w = (base / (1.0 + (residual / c) ** 2))[:, None]
+    rmsd = float(np.sqrt((base * residual ** 2).sum() / base.sum()))
     transform = lambda pts: (pts - p0) @ rot.T * scale + np.append(q0, 0.0)
     transform.scale = scale
     return transform, rmsd, rot
@@ -319,6 +329,17 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
             weights[st.centeredOn] = 10
             for nb in flat_heavy.GetAtomWithIdx(st.centeredOn).GetNeighbors():
                 weights[nb.GetIdx()] = 10
+    if site:
+        # A metal chelate's macrocycle is the rigid frame the eye follows; anchor the alignment on it (and the metal)
+        # so the ring lifts in place. Otherwise five stereocentres and chlorophyll's 20-atom phytyl tail pulled the
+        # ring ~3 bond lengths away from the drawing before any rotation.
+        from .depiction import _porphyrinoid_core
+        core = mol_in.GetSubstructMatch(_porphyrinoid_core()[0]) or tuple(_cage(mol_in))
+        weights = np.where(weights > 1, 3.0, 1.0)
+        for i in core:
+            if i < heavy_count:
+                weights[i] = 20
+        weights[site[0]] = 20
     # The flat (heavy-atom) drawing's wedges: (stereocentre, substituent, +1 toward the viewer / -1 away).
     Chem.WedgeMolBonds(flat_heavy, flat_heavy.GetConformer())
     wedges = [(b.GetBeginAtomIdx(), b.GetEndAtomIdx(), 1 if b.GetBondDir() == Chem.BondDir.BEGINWEDGE else -1)
@@ -387,6 +408,7 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     unspecified_bonds = [[mol_in.GetBondWithIdx(i).GetBeginAtomIdx(), mol_in.GetBondWithIdx(i).GetEndAtomIdx()]
                          for kind, i in real if kind == "bond"]
 
+    open_bonds = [sorted(pair) for pair in unspecified_bonds]
     kekule = Chem.Mol(drawn)
     Chem.Kekulize(kekule, clearAromaticFlags=True)
     rings = [list(r) for r in mol_in.GetRingInfo().AtomRings()]  # without metal bonds: chelate rings are not drawn rings
@@ -398,6 +420,16 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
                  else int(b.GetBondTypeAsDouble()), "ring": min(containing, key=lambda k: len(rings[k])) if containing else None}
         if b.GetBondType() == Chem.BondType.DATIVE:
             entry["dative"] = True  # drawn as an arrow toward the metal
+        # E/Z: from the input where it specifies the double bond; at an unspecified one, the configuration this
+        # conformer happens to have (marked arbitrary), like R/S at an unspecified centre.
+        pair = sorted((entry["a"], entry["b"]))
+        source_bond = mol_in.GetBondBetweenAtoms(*pair) if max(pair) < heavy_count else None
+        if source_bond is not None and source_bond.HasProp("_CIPCode") and source_bond.GetProp("_CIPCode") in ("E", "Z"):
+            entry["cip"] = source_bond.GetProp("_CIPCode")
+        elif pair in open_bonds:
+            model_bond = mol.GetBondBetweenAtoms(*pair)
+            if model_bond is not None and model_bond.HasProp("_CIPCode") and model_bond.GetProp("_CIPCode") in ("E", "Z"):
+                entry["cip"], entry["arbitrary"] = model_bond.GetProp("_CIPCode"), True
         bonds.append(entry)
     # Lone-pair directions from the real 3D geometry (VSEPR by hybridisation), rotated into the output frame.
     embedded = mol.GetConformer(conf_id).GetPositions()

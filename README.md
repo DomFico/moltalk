@@ -21,7 +21,7 @@ moltalk  (.venv/bin/moltalk → RDKit worker processes with time/memory limits)
 | Install in an isolated venv (`.venv`, Python 3.12, RDKit 2026.03.6, mcp 1.30.0) | **Verified** |
 | Test suite: 106 tests (104 offline by default; 2 live PubChem tests need `MOLTALK_NETWORK_TESTS=1`), including live PubChem and real-browser tests of the drawing, its 3D rotation, zoom, hydrogens and a phone touch screen | **Verified** (`pytest`) |
 | Tools and widget through official MCP clients (Python SDK over stdio/HTTP, MCP Inspector CLI) | **Verified** |
-| UI resource metadata (`ui://widget/molecule-v18.html`, `text/html;profile=mcp-app`, `_meta.ui.resourceUri` + `openai/outputTemplate`) | **Verified** |
+| UI resource metadata (`ui://widget/molecule-v19.html`, `text/html;profile=mcp-app`, `_meta.ui.resourceUri` + `openai/outputTemplate`) | **Verified** |
 | Widget rendering in a sandboxed iframe through the MCP Apps bridge, plus a follow-up `tools/call` from the widget | **Verified** in Chrome with a host harness that imitates ChatGPT (`tests/test_widget_ui.py`, `tests/test_widget_3d.py`) |
 | tunnel-client → stdio server path | **Verified** with tunnel-client's local control plane (`scripts/local-tunnel-test.sh`) |
 | Name resolution: bundled library (22,038 compounds), OPSIN for systematic names, live PubChem fallback | **Verified** (`tests/test_library.py`; PubChem with `MOLTALK_NETWORK_TESTS=1`) |
@@ -119,7 +119,7 @@ The widget's **Hide/Show atom indices** button redraws the structure through a f
 | Start automatically at login (optional) | `systemctl --user enable moltalk-tunnel` |
 | Remove the service | `scripts/uninstall-service.sh`. To also remove the key and profile: `rm -r ~/.config/moltalk` |
 
-After changing tool metadata or the widget: restart (`scripts/start.sh`), then in ChatGPT open the plugin under **Plugins** → **Refresh**, and start a new chat. If you change the widget substantially, bump the version in its URI (`molecule-v18` → `v19`), because ChatGPT caches templates.
+After changing tool metadata or the widget: restart (`scripts/start.sh`), then in ChatGPT open the plugin under **Plugins** → **Refresh**, and start a new chat. If you change the widget substantially, bump the version in its URI (`molecule-v19` → `v20`), because ChatGPT caches templates.
 
 ### If the Tunnel option is unavailable
 
@@ -137,7 +137,7 @@ A public HTTPS endpoint is the documented alternative. ChatGPT accepts only **OA
 | `conformer_3d(smiles)` | viewer-only | one calculated 3D conformer aligned to the flat drawing, for rotating it (hidden from the model) |
 | `resolve_name(name, allow_network)` | no | structure from the bundled library, OPSIN or (opt-in) PubChem, with source, CID, title, IUPAC name, `stereo_summary` and warnings; ambiguous or unknown names are errors |
 
-**UI component.** `moltalk/widget/molecule.html` is registered as `ui://widget/molecule-v18.html` (`text/html;profile=mcp-app`) with an empty CSP allowlist, so it makes no network requests. It uses the MCP Apps bridge (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`, `ui/notifications/size-changed`) and falls back to `window.openai`. The SVG is sent only in the result's `_meta`, which ChatGPT passes to the widget but not to the model; the chemistry data stays in `structuredContent` for the model. The SVG is sanitized before insertion. Pass `include_svg=true` for clients without UI support.
+**UI component.** `moltalk/widget/molecule.html` is registered as `ui://widget/molecule-v19.html` (`text/html;profile=mcp-app`) with an empty CSP allowlist, so it makes no network requests. It uses the MCP Apps bridge (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`, `ui/notifications/size-changed`) and falls back to `window.openai`. The SVG is sent only in the result's `_meta`, which ChatGPT passes to the widget but not to the model; the chemistry data stays in `structuredContent` for the model. The SVG is sanitized before insertion. Pass `include_svg=true` for clients without UI support.
 
 **Rotate the drawing in 3D.** Grab the flat drawing and drag (one finger on a phone). Over the first ~90 px it lifts off the page into 3D and keeps rotating as a chemical drawing:
 - **Drawing style:** flat colour, implicit carbons, element labels with their hydrogens (OH/HO, NH₂) in RDKit's colours, half-coloured bonds, ring double bonds on the inner side, and gaps where a bond passes in front of another.
@@ -177,8 +177,8 @@ OPSIN replaces PubChem only for *name → structure* of systematic names. It can
 Rebuild the library with `.venv/bin/python scripts/build_library.py` (network, Java and OPSIN; about 10 minutes). RDKit must recompute PubChem's InChIKey from its SMILES, or the entry is dropped; compounds above 150 heavy atoms are also dropped. The current build kept 22,038 entries. Any seed name PubChem cannot find stops the build.
 
 **Stereo labels.** **Stereo: Specified | All | Off** (default Specified) controls only the labels in the drawing; the analysis, the chips and the model's text are unchanged. The setting survives redraws, and switching is instant (RDKit tags its labels `CIP_Code`).
-- **Specified:** R/S and E/Z only where the input fixes the configuration.
-- **All:** also marks stereocentres the input leaves open. In the flat drawing that is **(?)**, because there is no configuration to show. RDKit draws it as a stereo annotation, so it has the same size and collision-avoiding placement as R/S; the viewer attributes each annotation glyph to its nearest atom to show or hide it. In the rotated view it is **(arb. R)**, the configuration this one conformer happens to have, with the tooltip "Configuration chosen for this displayed conformer; input stereochemistry unspecified". MolTalk does not write R\*/S\*, because in IUPAC usage that means relative configuration.
+- **Specified:** R/S and E/Z only where the input fixes the configuration, in both the flat and the rotated view (E/Z sits beside its double bond).
+- **All:** also marks stereocentres the input leaves open. Open double bonds are marked too. In the flat drawing that is **(?)**, because there is no configuration to show. RDKit draws it as a stereo annotation, so it has the same size and collision-avoiding placement as R/S; the viewer attributes each annotation glyph to the nearest labelled atom or double bond to show or hide it. In the rotated view it is **(arb. R)**, the configuration this one conformer happens to have, with the tooltip "Configuration chosen for this displayed conformer; input stereochemistry unspecified". MolTalk does not write R\*/S\*, because in IUPAC usage that means relative configuration.
 - **Off:** no stereo labels.
 
 **Export image.** **SVG** and **PNG** under the drawing save exactly what is on screen: the rotation, zoom, hydrogens, numbers, stereo labels and lone pairs. The image is cropped to the molecule with a small margin and has a transparent background, with dark ink (the drawing is always dark-on-white, whatever the theme). PNG is 3× the on-screen size. In the rotated view, bond-crossing gaps and label backings are painted in the background colour on screen; in the export they become real cut-outs (SVG masks), so nothing shows as white on a coloured slide.
@@ -216,6 +216,8 @@ Rebuild the library with `.venv/bin/python scripts/build_library.py` (network, J
 - **Not handled:** other metal complexes, such as ferrocene's sandwich bonding or cisplatin's ammine ligands, are drawn as stored.
 
 **Cages.** In bridged or cage-like ring systems (bridgeheads, or atoms in three or more rings, as in cubane), an unspecified element counts only if its R/S differs among the stereoisomers that can actually be built in 3D. Each candidate is tried with a small ETKDG budget and two seeds, mirror images are added automatically, and the check is capped at 256 candidates. Substituted cubanes therefore report no stereocentres, while norbornan-2-ol (3) and camphor (2) keep theirs. The rotated view shows R/S only at real stereocentres.
+
+**Alignment with the drawing.** The 3D model is rotated onto the flat drawing by a robust weighted fit: atoms that cannot match, such as a long tail folded differently in 3D, are progressively down-weighted, so the rigid part decides the rotation. For metal chelates the macrocycle and the metal anchor the fit. Before this, chlorophyll's phytyl tail turned the ring 2–3 bond lengths away from the drawing, so lifting looked scrambled; its ring now starts within 0.12. Flexible arms still swing as the drawing lifts, because the model is one real conformer.
 
 **Slow CPUs.** If 8 conformers cannot be embedded in time, as for F430 on Cloud Run's single slower CPU, one conformer is embedded with a 10 s budget before giving up. Molecules over 50 heavy atoms start with 4 candidates instead of 8. Small molecules (up to 30 heavy atoms) whose best conformer still fits the flat drawing poorly try 32. With only 8 random conformers, 2-bromobutane had no anti chain, so its methyl swung about 2 bond lengths on lifting.
 

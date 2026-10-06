@@ -133,3 +133,57 @@ def test_stereo_labels_and_exports():
                 await browser.close()
 
     asyncio.run(run())
+
+
+def test_double_bond_labels_follow_the_stereo_setting():
+    async def run():
+        params = StdioServerParameters(command=sys.executable, args=["-m", "moltalk.server"])
+        async with stdio_client(params) as (read, write), ClientSession(read, write) as client:
+            await client.initialize()
+            html = (await client.read_resource(WIDGET_URI)).contents[0].text
+
+            async def py_call_tool(raw):
+                request = json.loads(raw)
+                return json.dumps(dump(await client.call_tool(request["name"], request["arguments"])))
+
+            async with playwright_api.async_playwright() as pw:
+                channel = os.getenv("MOLTALK_UI_BROWSER_CHANNEL", "chrome")
+                browser = await pw.chromium.launch(channel=None if channel == "chromium" else channel)
+                page = await browser.new_page(viewport={"width": 760, "height": 1000})
+                await page.expose_function("pyCallTool", py_call_tool)
+                await page.set_content(EXPORT_HOST)
+                frame = page.frame_locator("#w")
+                inner = page.frames[1]
+                texts = "s => [...s.querySelectorAll('text')].map(t => t.textContent).join(' ')"
+                visible = """() => [...document.querySelectorAll('.liftable > svg:not(.lift) .CIP_Code')]
+                                 .filter(n => n.style.display !== 'none').length"""
+                for smiles, flat_specified, flat_all, specified_tag, all_tag in [
+                        ("C/C=C/C(C)O", 3, 6, "(E)", "(arb. "),      # E given; the stereocentre is open
+                        ("CC=CC(C)O", 0, 6, None, "(arb. ")]:         # both open: "(?)" twice when flat
+                    args = {"smiles": smiles, "label": "test"}
+                    result = dump(await client.call_tool("draw_molecule", args))
+                    await page.evaluate("([h, a, r]) => startWidget(h, a, r, 'light')", [html, args, result])
+                    box = frame.locator(".liftable")
+                    await box.wait_for()
+                    stereo = frame.get_by_role("group", name="Stereo labels")
+                    await stereo.get_by_role("button", name="Specified").click()
+                    assert await inner.evaluate(visible) == flat_specified, smiles
+                    await stereo.get_by_role("button", name="All").click()
+                    assert await inner.evaluate(visible) == flat_all, smiles
+                    await stereo.get_by_role("button", name="Specified").click()
+                    await box.focus()
+                    for _ in range(3):
+                        await box.press("ArrowRight")
+                    lift = frame.locator("svg.lift")
+                    await lift.locator("text").first.wait_for()
+                    shown = await lift.evaluate(texts)
+                    assert (specified_tag in shown) if specified_tag else ("(E)" not in shown and "(Z)" not in shown), (smiles, shown)
+                    assert "arb." not in shown
+                    await stereo.get_by_role("button", name="All").click()
+                    assert all_tag in await lift.evaluate(texts)
+                    await stereo.get_by_role("button", name="Off").click()
+                    shown = await lift.evaluate(texts)
+                    assert "(E)" not in shown and "(Z)" not in shown and "arb." not in shown
+                await browser.close()
+
+    asyncio.run(run())

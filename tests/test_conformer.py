@@ -95,3 +95,19 @@ def test_falls_back_to_one_conformer_on_a_slow_cpu(monkeypatch):
     monkeypatch.setattr(cf.AllChem, "EmbedMultipleConfs", lambda mol, n, params: real(mol, n, params) if n == 1 else [])
     model = conformer("CC(=O)Oc1ccccc1C(=O)O", False)
     assert len(model["atoms"]) == 13
+
+
+def test_macrocycle_lifts_in_place_despite_a_long_tail():
+    # Plain least squares let chlorophyll's phytyl tail turn the ring ~2-3 bond lengths away from the flat drawing;
+    # the robust fit keeps the rigid core where it is drawn.
+    import numpy as np
+    from rdkit import Chem
+    from moltalk import library
+    from moltalk.depiction import _porphyrinoid_core
+    from moltalk.chemistry import conformer
+    smiles = library.find_name("chlorophyll a")[1]["smiles"]
+    model = conformer(smiles, False)
+    core = list(Chem.MolFromSmiles(smiles).GetSubstructMatch(_porphyrinoid_core()[0]))
+    xy = np.array([a["xy"] for a in model["atoms"]])[core]
+    xyz = np.array([a["xyz"] for a in model["atoms"]])[core]
+    assert np.linalg.norm(xyz[:, :2] - xy, axis=1).mean() < 0.3

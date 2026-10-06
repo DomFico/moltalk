@@ -881,20 +881,30 @@
       if (this.lifted) this.paint();  // repaint now, so the toggle feels immediate
     }
     // Stereo labels on the flat drawing are RDKit's own annotations (class CIP_Code): R/S and E/Z where the input
-    // specifies them, and "(?)" at stereocentres it leaves open. Each glyph is attributed to its nearest atom, so
-    // "Specified" can hide just the "(?)" ones; "All" shows both; "Off" hides every stereo label.
+    // specifies them, and "(?)" at stereocentres and double bonds it leaves open. Each glyph is attributed to the
+    // nearest labelled atom or bond (its midpoint), so "Specified" can hide just the "(?)" ones; "All" shows both;
+    // "Off" hides every stereo label.
     updateStereoLabels() {
       if (!this.cipGlyphs) {
-        const px = this.meta.atom_px;
-        const open = new Set(((this.data.analysis || {}).stereo_summary || {}).unspecified_atoms || []);
+        const px = this.meta.atom_px, a = this.data.analysis || {}, summary = a.stereo_summary || {};
+        const mid = ([i, j]) => [(px[i][0] + px[j][0]) / 2, (px[i][1] + px[j][1]) / 2];
+        const anchors = [
+          ...(a.stereocenters || []).map((c) => ({ at: px[c.atom_index], open: false })),
+          ...(summary.unspecified_atoms || []).map((i) => ({ at: px[i], open: true })),
+          ...(a.double_bond_stereo || []).map((b) => ({ at: mid(b.atom_indices), open: false })),
+          ...(summary.unspecified_bonds || []).map((b) => ({ at: mid(b), open: true })),
+        ].filter((anchor) => anchor.at);
         this.cipGlyphs = [...this.flatSvg.querySelectorAll(".CIP_Code")].map((node) => {
-          let nearest = -1;
+          let open = false;
           try {
             const b = node.getBBox(), cx = b.x + b.width / 2, cy = b.y + b.height / 2;
             let best = Infinity;
-            px.forEach(([x, y], i) => { const d = Math.hypot(x - cx, y - cy); if (d < best) { best = d; nearest = i; } });
+            for (const anchor of anchors) {
+              const d = Math.hypot(anchor.at[0] - cx, anchor.at[1] - cy);
+              if (d < best) { best = d; open = anchor.open; }
+            }
           } catch (err) { /* not measurable: treat as a specified label */ }
-          return { node, open: open.has(nearest) };
+          return { node, open };
         });
       }
       for (const { node, open } of this.cipGlyphs) {
@@ -1201,6 +1211,21 @@
             const cut = shorten * len;
             halves(x1 + nx * off + ux * cut, y1 + ny * off + uy * cut, x2 + nx * off - ux * cut, y2 + ny * off - uy * cut,
                    a, b, 2, opacity);
+          }
+          // E/Z beside the double bond, under the same Stereo setting as R/S.
+          const ez = item.bond.cip && (item.bond.arbitrary ? stereoLabels === "all" : stereoLabels !== "off");
+          if (ez) {
+            const side = (gap + 0.45 * fs) * (ny > 0 ? -1 : 1);  // above the bond on screen
+            const tag = svgEl("text", { x: ((p.x + q.x) / 2 + nx * side).toFixed(1), y: ((p.y + q.y) / 2 + ny * side).toFixed(1),
+              "text-anchor": "middle", "dominant-baseline": "central", "font-size": Math.max(8, 0.55 * fs).toFixed(1),
+              "font-family": "system-ui, sans-serif", fill: "#555555" });
+            tag.textContent = item.bond.arbitrary ? `(arb. ${item.bond.cip})` : `(${item.bond.cip})`;
+            if (item.bond.arbitrary) {
+              const title = svgEl("title", {});
+              title.textContent = "Configuration chosen for this displayed conformer; input stereochemistry unspecified";
+              tag.append(title);
+            }
+            g.append(tag);
           }
         } else {
           const i = item.atom, atom = m.atoms[i], p = pts[i], lab = labels[i];

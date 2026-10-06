@@ -52,7 +52,9 @@ def _stereo_summary(mol, potential) -> dict:
     else:
         status = "partially specified"
     summary = {"status": status, "specified": specified, "unspecified": unspecified,
-               "unspecified_atoms": sorted(i for kind, i in real if kind == "atom")}
+               "unspecified_atoms": sorted(i for kind, i in real if kind == "atom"),
+               "unspecified_bonds": sorted([mol.GetBondWithIdx(i).GetBeginAtomIdx(), mol.GetBondWithIdx(i).GetEndAtomIdx()]
+                                           for kind, i in real if kind == "bond")}
     if ignored:
         summary["non_stereogenic_ignored"] = ignored  # e.g. adamantane bridgeheads: flipping them changes nothing
     return summary
@@ -97,7 +99,7 @@ def _atom_name(i: int, locants: dict | None) -> str:
     locant = (locants or {}).get(str(i))
     return f"C{locant}, atom {i}" if locant else f"atom {i}"
 
-def _svg(mol, width: int, height: int, atom_indices: bool, locants: dict | None = None, open_atoms=()):
+def _svg(mol, width: int, height: int, atom_indices: bool, locants: dict | None = None, open_atoms=(), open_bonds=()):
     """Depict an already-parsed molecule; returns the SVG, the drawing's wedge/dash bonds and layout quality.
     open_atoms: stereocentres the input leaves unspecified; RDKit annotates them "(?)" in the same style and with the
     same collision-avoiding placement as R/S (the viewer shows them only when asked for all stereo labels)."""
@@ -107,6 +109,10 @@ def _svg(mol, width: int, height: int, atom_indices: bool, locants: dict | None 
     for i in open_atoms:
         if i < original_atoms and not mol.GetAtomWithIdx(i).HasProp("_CIPCode"):
             mol.GetAtomWithIdx(i).SetProp("_CIPCode", "?")
+    for a, b in open_bonds:  # an unspecified double bond: "(?)" where E/Z would be
+        bond = mol.GetBondBetweenAtoms(a, b)
+        if bond is not None and not bond.HasProp("_CIPCode"):
+            bond.SetProp("_CIPCode", "?")
     drawer = rdMolDraw2D.MolDraw2DSVG(width, height)
     drawer.drawOptions().addAtomIndices = atom_indices and not locants
     drawer.drawOptions().addStereoAnnotation = True
@@ -204,7 +210,8 @@ def draw(smiles: str, width: int = 640, height: int = 420, atom_indices: bool = 
     drawn_bonds = [[b.GetBeginAtomIdx(), b.GetEndAtomIdx()] for b in mol.GetBonds()]
     analysis = analyze(smiles)
     svg, bonds, depiction, atom_px = _svg(mol, width, height, atom_indices, locants,
-                                          analysis["stereo_summary"]["unspecified_atoms"])
+                                          analysis["stereo_summary"]["unspecified_atoms"],
+                                          analysis["stereo_summary"]["unspecified_bonds"])
     if coordination_note:
         depiction["coordination_note"] = coordination_note
     return {"svg": svg, "atom_px": atom_px, "drawn_bonds": drawn_bonds, "lone_pairs": electron_map, "depicted_stereo_bonds": bonds, "depiction": depiction, "note": WEDGE_NOTE,
