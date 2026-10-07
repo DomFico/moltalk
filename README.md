@@ -23,7 +23,7 @@ moltalk  (.venv/bin/moltalk → RDKit worker processes with time/memory limits)
 | Install in an isolated venv (`.venv`, Python 3.12, RDKit 2026.03.6, mcp 1.30.0) | **Verified** |
 | Test suite: 106 tests (104 offline by default; 2 live PubChem tests need `MOLTALK_NETWORK_TESTS=1`), including live PubChem and real-browser tests of the drawing, its 3D rotation, zoom, hydrogens and a phone touch screen | **Verified** (`pytest`) |
 | Tools and widget through official MCP clients (Python SDK over stdio/HTTP, MCP Inspector CLI) | **Verified** |
-| UI resource metadata (`ui://widget/molecule-v30.html`, `text/html;profile=mcp-app`, `_meta.ui.resourceUri` + `openai/outputTemplate`) | **Verified** |
+| UI resource metadata (`ui://widget/molecule-v31.html`, `text/html;profile=mcp-app`, `_meta.ui.resourceUri` + `openai/outputTemplate`) | **Verified** |
 | Widget rendering in a sandboxed iframe through the MCP Apps bridge, plus a follow-up `tools/call` from the widget | **Verified** in Chrome with a host harness that imitates ChatGPT (`tests/test_widget_ui.py`, `tests/test_widget_3d.py`) |
 | tunnel-client → stdio server path | **Verified** with tunnel-client's local control plane (`scripts/local-tunnel-test.sh`) |
 | Name resolution: bundled library (22,038 compounds), OPSIN for systematic names, live PubChem fallback | **Verified** (`tests/test_library.py`; PubChem with `MOLTALK_NETWORK_TESTS=1`) |
@@ -121,7 +121,7 @@ The widget's **Hide/Show atom indices** button redraws the structure through a f
 | Start automatically at login (optional) | `systemctl --user enable moltalk-tunnel` |
 | Remove the service | `scripts/uninstall-service.sh`. To also remove the key and profile: `rm -r ~/.config/moltalk` |
 
-After changing tool metadata or the widget: restart (`scripts/start.sh`), then in ChatGPT open the plugin under **Plugins** → **Refresh**, and start a new chat. If you change the widget substantially, bump the version in its URI (`molecule-v30` → `v31`), because ChatGPT caches templates.
+After changing tool metadata or the widget: restart (`scripts/start.sh`), then in ChatGPT open the plugin under **Plugins** → **Refresh**, and start a new chat. If you change the widget substantially, bump the version in its URI (`molecule-v31` → `v32`), because ChatGPT caches templates.
 
 ### If the Tunnel option is unavailable
 
@@ -140,7 +140,7 @@ A public HTTPS endpoint is the documented alternative. ChatGPT accepts only **OA
 | `conformer_3d(smiles)` | viewer-only | one calculated 3D conformer aligned to the flat drawing, for rotating it (hidden from the model) |
 | `resolve_name(name, allow_network)` | no | structure from the bundled library, OPSIN or (opt-in) PubChem, with source, CID, title, IUPAC name, `stereo_summary` and warnings; ambiguous or unknown names are errors |
 
-**UI component.** `moltalk/widget/molecule.html` is registered as `ui://widget/molecule-v30.html` (`text/html;profile=mcp-app`) with an empty CSP allowlist, so it makes no network requests. It uses the MCP Apps bridge (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`, `ui/notifications/size-changed`) and falls back to `window.openai`. The SVG is sent only in the result's `_meta`, which ChatGPT passes to the widget but not to the model; the chemistry data stays in `structuredContent` for the model. The SVG is sanitized before insertion. Pass `include_svg=true` for clients without UI support.
+**UI component.** `moltalk/widget/molecule.html` is registered as `ui://widget/molecule-v31.html` (`text/html;profile=mcp-app`) with an empty CSP allowlist, so it makes no network requests. It uses the MCP Apps bridge (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`, `ui/notifications/size-changed`) and falls back to `window.openai`. The SVG is sent only in the result's `_meta`, which ChatGPT passes to the widget but not to the model; the chemistry data stays in `structuredContent` for the model. The SVG is sanitized before insertion. Pass `include_svg=true` for clients without UI support.
 
 **Rotate the drawing in 3D.** Grab the flat drawing and drag (one finger on a phone). Over the first ~90 px it lifts off the page into 3D and keeps rotating as a chemical drawing:
 - **Drawing style:** flat colour, implicit carbons, element labels with their hydrogens (OH/HO, NH₂) in RDKit's colours, half-coloured bonds, ring double bonds on the inner side, and gaps where a bond passes in front of another.
@@ -189,7 +189,53 @@ Tested offline on 25 typical course molecules (chains, rings, aromatics, steroid
 - **Drawing:** one ring bond at the axis is wedged or hashed. `depicted_stereo_bonds` explains it as the axis twist, not a stereocentre. Under the Stereo control, the axis carries (Ra)/(Sa), or (?) when it is open.
 - **3D:** ETKDG embeds the specified twist. After the tail swing and chain straightening, the helicity is checked and, if a rotation turned it over, set back. The rotated view tags the axis (Ra)/(Sa). An open axis gets (arb. Ra), and the 3D export says which twist it chose.
 - **Names stay strict:** an axial descriptor in a name is never resolved, so "(R)-BINAP", "(S)-BINOL" and "(Ra)-BINAP" fail closed. Plain "BINAP" resolves with the axis reported open, and `enumerate_stereoisomers` then shows both atropisomers.
-- **Not covered:** InChI does not encode axial chirality, so both atropisomers share an InChIKey (a warning says so). Other axial elements (allenes, spiranes, helicenes) and C–N axes in non-aromatic amides are not detected.
+- **C–N axes:** the same machinery covers an aryl ring on a tertiary amide nitrogen whose two ortho positions carry different substituents. Metolachlor is the reference case, with four stereoisomers (R/S × Ra/Sa). Ordinary amides are never treated as axes; their slowed C(O)–N rotation is not atropisomerism. Acetanilide, N-methylacetanilides, symmetric 2,6-dimethyl anilides, lidocaine, DMF and imides are all negative controls.
+- **Not covered:** InChI does not encode axial chirality, so both atropisomers share an InChIKey (a warning says so).
+
+**Stereogenic units (allenes, spiro compounds, helicenes).** Every kind of stereochemistry MolTalk handles is reported in one form, `analysis.stereo_units` (`moltalk/stereounits.py`). Each entry has:
+- `type`: tetrahedral, double_bond, axis, allene, spiro or helix;
+- `atoms` and `bonds`;
+- `specified`, `configuration`, `possible_configurations` and `configuration_source`;
+- `verification` and `descriptor`;
+- `stability`.
+
+Three questions are kept apart:
+1. Is the unit stereogenic? This is a graph analysis.
+2. Does the input specify its configuration?
+3. Has the descriptor been checked against the IUPAC definition?
+
+Stability is a separate field. Being stereogenic does not mean the isomers can be isolated.
+
+- **Allenes and even cumulenes** (IUPAC P-93.4.2.2): a chain with an even number of cumulated C=C bonds whose two ends each carry two different groups. 1,3-Dichloroallene and penta-2,3-diene qualify. Propadiene, 1,1-disubstituted allenes and odd cumulenes (planar, so E/Z) do not.
+  - Descriptor: M/P, the form IUPAC prefers, with Ra/Sa as the alternative.
+  - How it is checked: both rules are measured on 3D coordinates. The helicity rule uses the torsion from the near top-ranked group to the far one. The CIP axial rule is the tetrahedral rule on the elongated tetrahedron; its sign is calibrated against RDKit on (S)-alanine. The two must agree as IUPAC states (M = Ra, matching its example (1M)-1,3-dichloropropa-1,2-diene = (1Ra)), or no descriptor is shown.
+- **Spiro compounds:**
+  - **Xabcd** (four different ring neighbours): an ordinary R/S centre.
+  - **Xaabb** (2,6-dichlorospiro[3.3]heptane, Fecht's acid): IUPAC names these with R/S at the spiro and ring atoms. Only RDKit's newer stereo perception keeps them, so it is used for these molecules alone. M/P is also given for two four-membered rings, and the tests reproduce IUPAC's example (2R,4S,6R) = (2P).
+  - **Xabab** (spiro[4.4]nonane-1,6-dione): IUPAC's descriptor needs a special CIP digraph (P-93.5.3.2) that neither RDKit nor MolTalk implements. The configuration is represented, enumerated, drawn and built in 3D, but no descriptor is given, and the result says why.
+  - Achiral spiranes report nothing: spiropentane, spiropentadiene, spiro[3.3]heptane and 2-chlorospiro[3.3]heptane.
+- **Helicenes:** five or more six-membered rings ortho-fused in a chain that always turns the same way, with no ring atom in three rings.
+  - Negative controls: [4]helicene, picene, pentacene and C60.
+  - Descriptor: P or M, from the handedness of the helix through the ring centres (right-handed = P), as IUPAC's (P)/(M)-hexahelicene.
+  - Stability: [6] and higher are configurationally stable; [5]helicene racemises slowly at room temperature.
+- **Representation:** SMILES cannot state an allene's, helicene's or Xabab spiro atom's configuration. MolTalk does not invent a SMILES extension. The configuration travels as standard CXSMILES with 3D coordinates, or as a 3D MOL/SDF file, and is measured from them. A specified configuration makes `canonical_smiles` that CXSMILES. `enumerate_stereoisomers` returns each configuration in that form, and enantiomer pairs are matched.
+- **Drawing:**
+  - Allenes: one end's substituents in the paper and the other end's wedged and hashed, with an (M)/(P) label.
+  - Xabab spiro atoms: wedge and hash on the second ring's bonds at the spiro atom, which IUPAC's drawing rules allow.
+  - Every wedge choice is checked on a pseudo-3D version of the drawing (wedge = toward the viewer) with the same measurement as real coordinates, so a drawing cannot contradict its configuration.
+  - Helicenes: no wedges, which would imply stereocentres. They are drawn as a view of the helix, the textbook picture with the end rings side by side, labelled (P)/(M); a projection has no depth and implies neither hand.
+- **3D:**
+  - ETKDG does not know these configurations, so conformers that do not match are dropped, or mirrored when nothing else in the molecule is chiral.
+  - MMFF94 and UFF both flatten allenes (1,3-dichloroallene went from 84° to 180°), so each allene's ends are held perpendicular during the clean-up. This also fixes plain allenes, which were drawn flat before.
+  - Helicenes are embedded with ETDG: ETKDG's flat-aromatic-ring knowledge cannot embed [6]helicene within 10 s.
+  - The spiro squaring step keeps each ring on its side, so it cannot invert a chiral spirane.
+- **Export:** these configurations survive CXSMILES, MOL/SDF 3D and PDB (round-trip tested). 2D MOL/SDF and CDXML cannot carry them; the export says so instead of silently dropping them. PDB and XYZ have no bond orders, so a reader cannot re-perceive the units, and the export warns. Xaabb spiranes and biaryl/C–N axes survive 2D and 3D MOL/SDF and CDXML.
+- **Names stay strict:** "(P)-hexahelicene" and "(Ra)-1,3-dichloropropa-1,2-diene" are not resolved, like "(R)-BINAP".
+- **Not supported:**
+  - Combining a hindered axis and an allene/helix/spiro unit in one enumeration (refused with a message).
+  - Heterohelicenes with five-membered rings.
+  - Planar chirality (cyclophanes).
+  - Octahedral and other non-tetrahedral centres.
 
 OPSIN replaces PubChem only for *name → structure* of systematic names. It cannot *generate* a name for a structure, so structure → IUPAC name still comes from the library or PubChem. A novel structure found in neither is shown with atom indices and no name, rather than a guessed one.
 
@@ -264,7 +310,21 @@ Rebuild the library with `.venv/bin/python scripts/build_library.py` (network, J
 
 **Strain and spiro centres.** Candidates more than 8 kcal/mol above the best are dropped before matching the drawing; one spiropentane candidate had collapsed to 45° and fitted the bowtie drawing best. The filter is skipped for porphyrin-type macrocycles, where MMFF rates a bowed naphthalocyanine below the flat one. A spiro carbon joining two 3- or 4-membered rings is set geometrically to the real D₂d shape (perpendicular rings on a straight axis). MMFF twists spiropentadiene to 56° and even rates that lower in energy.
 
-**Crowded layouts.** When RDKit's layout has crossings or overlaps (BINAP: both PPh₂ groups drawn on top of the naphthalenes), CoordGen is tried at its best precision. Any connecting bond it stretched is pulled back to normal length (rotating or mirroring the smaller side) if that adds no overlaps. Tested on BINAP, Xantphos, rubrene, hexaphenylbenzene, triphenylphosphine and Pd(PPh₃)₄. BINAP's axial chirality is drawn as described under *Atropisomers*.
+**Crowded layouts** (`moltalk/depiction.py`). The search runs when RDKit's layout has crossings, overlapping atoms, or a bond longer than 1.5× the median. Before this change, BINAP got CoordGen's layout with its biaryl bond stretched 3.8×.
+- **Candidates:** RDKit's own layout, RDKit with random ring flips, CoordGen at best precision, and a hub layout. The hub layout sets each branch around the most central branching atom on its own.
+- **Repair:** each candidate is repaired by a greedy search over rigid moves. For each acyclic bond, the smaller side is set to its target length, then turned or mirrored about the bond. Only the moved part is rescored.
+- **Score:** the energy terms are bond-length deviation, crowding, an atom lying on a bond, bond crossings, uneven bond angles around an atom, and ring polygons that are not regular. A 3.8× bond costs about 730, so a stretched layout never wins. Metal–ligand bonds may be drawn up to 2.5× long.
+- **Acceptance:** a candidate never has more crossings or overlapping atoms than the current layout. Its wedges must read back (molfile round trip) as the input's stereochemistry. It is then picked by crossings and overlaps, stretched bonds, and energy.
+- **Panel:** BINAP, BINOL, gossypol, Xantphos, rubrene, hexaphenylbenzene, tetraphenylmethane, PPh₃, Wilkinson's catalyst, Pd(PPh₃)₄ (both as stored), and [5]/[6]helicene all draw with no crossings, no overlaps, and a longest bond of 1.5× or less. The stereo-unspecified BINAP and both atropisomers get the same clean layout.
+- **500 library compounds, before → after:**
+  - layouts with a bond over 1.5×: 6 → 3;
+  - longest bond: 2.6× (unchanged); median longest bond: 1.0×;
+  - crossings: 15 → 15; overlapping atoms: 2 → 1;
+  - layouts changed: 12, none with more crossings or overlaps.
+
+  The three left are two bicyclic amanitin-type peptides and a bridged tropane. A transannular bridge cannot be drawn flat without either a long bond or a crossing, and MolTalk keeps the long bond rather than add a crossing.
+- **Limitation:** covalently bonded Pd(PPh₃)₄ (four P–Pd bonds written out) cannot be drawn without crossings even with long M–P bonds, because four PPh₃ groups do not fit around one atom in 2D. Textbooks write "PPh₃" for this; the library stores it as separate ligands, which draw cleanly.
+- **Cost:** layout time over the 500 compounds went from 10 to about 22 s (median unchanged). The search has a 1.5 s budget, and a third of that above 60 atoms, where CoordGen alone already takes seconds.
 
 **Slow CPUs.** If 8 conformers cannot be embedded in time, as for F430 on Cloud Run's single slower CPU, one conformer is embedded with a 10 s budget before giving up. Molecules over 50 heavy atoms start with 4 candidates instead of 8. Small molecules (up to 30 heavy atoms) whose best conformer still fits the flat drawing poorly try 32. With only 8 random conformers, 2-bromobutane had no anti chain, so its methyl swung about 2 bond lengths on lifting.
 

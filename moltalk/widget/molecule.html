@@ -459,7 +459,11 @@
       el("header", {}, el("h1", {}, data.label || "Molecule"), el("span", { class: "formula" }, a.formula || "")),
       el("div", { class: "toolbar" }, hToggle, lpToggle, toggle, stereoSeg),
       el("div", { class: "ids" },
-        el("span", { class: "k" }, "SMILES:"), el("code", { class: "v", title: "Canonical SMILES" }, a.canonical_smiles || ""),
+        el("span", { class: "k" }, "SMILES:"),
+        // A CXSMILES carrying coordinates (an axis twist, an allene or helicene configuration) is long: show the
+        // SMILES part, with the full text in the tooltip and copy.
+        el("code", { class: "v", title: a.canonical_smiles || "" },
+           (a.canonical_smiles || "").includes(" |") ? `${a.canonical_smiles.split(" |")[0]} (CXSMILES with coordinates)` : (a.canonical_smiles || "")),
         el("span", { class: "k" }, "IUPAC:"),
         data.iupac_name
           ? el("span", { class: "v name", title: `From ${data.name_source} (exact structure match)` }, data.iupac_name)
@@ -469,6 +473,15 @@
     const chips = el("ul", { class: "chips", "aria-label": "Stereochemistry" });
     for (const c of a.stereocenters || []) chips.append(el("li", {}, c.locant ? `C${c.locant}: ${c.cip}` : `atom ${c.atom_index} (${c.element}): ${c.cip}`));
     for (const b of a.double_bond_stereo || []) chips.append(el("li", {}, `bond ${b.atom_indices.join("–")}: ${b.configuration}`));
+    // Axes, allenes, spiro systems, helicenes: the unit and its verified descriptor (none is ever guessed).
+    const unitName = { axis: "axis", allene: "allene", spiro: "spiro", helix: "helicene" };
+    for (const u of a.stereo_units || []) {
+      if (!unitName[u.type] || !u.specified) continue;
+      const where = u.type === "helix" ? `[${u.rings}]` : `${u.atoms.slice(0, 3).join("–")}${u.atoms.length > 3 ? "…" : ""}`;
+      const value = u.descriptor ? u.descriptor + (u.alternative_descriptor ? ` (${u.alternative_descriptor})` : "")
+        : (u.configuration ? `${u.configuration}, no descriptor` : "unverified");
+      chips.append(el("li", { title: `${u.verification || ""}. ${u.stability || ""}` }, `${unitName[u.type]} ${where}: ${value}`));
+    }
     if (a.stereo_summary && a.stereo_summary.unspecified) chips.append(el("li", { class: "warn" }, `${a.stereo_summary.unspecified} stereo element(s) unspecified`));
     for (const g of Object.keys(a.functional_groups || {})) chips.append(el("li", { class: "warn" }, g));
     const details = el("div", { class: "details" }, liftNotes);
@@ -964,6 +977,9 @@
           ...(summary.unspecified_bonds || []).map((b) => ({ at: mid(b), open: true })),
           ...(a.axial_stereo || []).map((x) => ({ at: mid(x.atom_indices), open: false })),  // Ra/Sa of a chirality axis
           ...(summary.unspecified_axes || []).map((b) => ({ at: mid(b), open: true })),
+          // Allene and helicene labels sit on a bond of the unit; "(?)" when the input leaves it open.
+          ...(a.stereo_units || []).filter((u) => u.label_atoms && ["allene", "helix"].includes(u.type))
+            .map((u) => ({ at: mid(u.label_atoms), open: !u.specified })),
         ].filter((anchor) => anchor.at);
         this.cipGlyphs = [...this.flatSvg.querySelectorAll(".CIP_Code")].map((node) => {
           let open = false;
@@ -1607,12 +1623,14 @@
     isomers.forEach((iso, i) => {
       const cip = (iso.stereocenters || []).map((c) => `${c.atom_index}${c.cip}`).join(", ");
       const ez = [...(iso.double_bond_stereo || []).map((b) => b.configuration),
-                  ...(iso.axial_stereo || []).filter((x) => x.verified).map((x) => `axis ${x.cip}`)].join(", ");
+                  ...(iso.axial_stereo || []).filter((x) => x.verified).map((x) => `axis ${x.cip}`),
+                  ...(iso.stereo_units || []).filter((u) => u.specified).map((u) =>
+                    `${u.type === "helix" ? "helix" : u.type} ${u.descriptor || u.configuration}`)].join(", ");
       const relation = iso.achiral ? "achiral (meso)" : iso.enantiomer_index != null ? `enantiomer of #${iso.enantiomer_index}` : "";
       grid.append(el("div", { class: "card" },
         svgs[i] ? canvas(svgs[i], "Stereoisomer " + iso.smiles) : null,
         el("p", {}, el("strong", {}, `#${iso.index} `), [cip, ez].filter(Boolean).join("; ") || "—", relation ? ` · ${relation}` : ""),
-        el("p", {}, el("code", {}, iso.smiles))));
+        el("p", {}, el("code", { title: iso.smiles }, iso.smiles.includes(" |") ? `${iso.smiles.split(" |")[0]} (CXSMILES)` : iso.smiles))));
     });
     root.append(grid);
     if (data.truncated) root.append(el("p", { class: "note" }, "List truncated at the requested limit."));

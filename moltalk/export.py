@@ -11,7 +11,7 @@ from io import StringIO
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdChemDraw
 
-from . import atropisomer
+from . import atropisomer, chemistry, stereounits
 from .chemistry import conformer, parse
 from .depiction import layout
 
@@ -77,13 +77,18 @@ def export_structure(smiles: str, fmt: str = "cdxml", coordinates: str | None = 
     if coordinates not in allowed:
         raise ValueError(f"{description} files support {' or '.join(allowed)} coordinates, not {coordinates!r}.")
     mol = parse(smiles)
-    canonical = atropisomer.canonical_smiles(mol)  # CXSMILES when an axis twist must be carried
+    canonical = chemistry.canonical(mol)  # CXSMILES when an axis twist or a 3D-only configuration must be carried
+    unit_configs = stereounits.stated(mol)
     title = (name or canonical)[:80]
     warnings, notes = [], []
 
     if fmt == "smiles":
         text = f"{canonical}\t{name}\n" if name else canonical + "\n"
     elif coordinates == "2d":
+        if unit_configs:
+            warnings.append("A 2D file cannot carry the configuration of an allene, helicene or Xabab spiro atom, so this "
+                            "file leaves it unspecified (the structure is otherwise exact). Export 3D (mol or sdf with "
+                            "coordinates='3d') or SMILES (MolTalk writes CXSMILES with 3D coordinates) to keep it.")
         if hydrogens:
             mol = Chem.AddHs(mol)
         depiction = layout(mol)  # the same deterministic layout the drawing uses
@@ -116,6 +121,10 @@ def export_structure(smiles: str, fmt: str = "cdxml", coordinates: str | None = 
             text = Chem.MolToPDBBlock(mol, flavor=4)  # flavor 4: CONECT records for every bond
         else:
             text = Chem.MolToXYZBlock(mol)
+    if fmt in ("pdb", "xyz") and (atropisomer.specified_axes(mol) or unit_configs):
+        warnings.append(f"{description} files have no bond orders, so a program reading this file cannot re-perceive "
+                        "the hindered axis, allene, helicene or spiro unit from it; the coordinates hold the "
+                        "configuration, but use MOL/SDF 3D to keep it reliably.")
     if fmt in ("pdb", "xyz"):
         notes.append(f"{description} files store atoms and coordinates only; bond orders and charges are "
                      + ("not stored." if fmt == "xyz" else "only partly stored (PDB has no bond orders)."))

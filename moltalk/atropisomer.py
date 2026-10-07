@@ -86,31 +86,70 @@ def _ortho_substituted(mol, axis_atom: int, ortho: int) -> bool:
                for n in mol.GetAtomWithIdx(ortho).GetNeighbors())
 
 
+def _ring_end(mol, k, atom, other):
+    """(ok, ortho-substituted count) for an sp2 ring atom at one end of an axis: two ring neighbours that rank
+    differently (else that side is symmetric and the axis cannot be stereogenic)."""
+    if not (atom.IsInRing() and (atom.GetIsAromatic() or atom.GetHybridization() == Chem.HybridizationType.SP2)):
+        return False, 0
+    ortho = [n.GetIdx() for n in atom.GetNeighbors() if n.GetIdx() != other.GetIdx() and n.GetAtomicNum() > 1]
+    if len(ortho) != 2 or not all(mol.GetBondBetweenAtoms(atom.GetIdx(), o).IsInRing() for o in ortho):
+        return False, 0
+    ranked = _ranked(k, atom.GetIdx(), other.GetIdx())
+    if ranked[0][1] == ranked[1][1]:  # e.g. 2,6-dimethylphenyl: the two sides are the same, no chirality
+        return False, 0
+    return True, sum(_ortho_substituted(mol, atom.GetIdx(), o) for o in ortho)
+
+
+def _amide_nitrogen(mol, k, atom, other) -> bool:
+    """A tertiary amide nitrogen (planar, three heavy neighbours, one of them C=O) whose other two ligands differ."""
+    if atom.GetAtomicNum() != 7 or atom.GetDegree() != 3 or atom.GetTotalNumHs() or atom.GetFormalCharge():
+        return False
+    acyl = any(n.GetAtomicNum() == 6 and any(b.GetBondType() == Chem.BondType.DOUBLE and b.GetOtherAtom(n).GetAtomicNum() in (8, 16)
+                                             for b in n.GetBonds())
+               for n in atom.GetNeighbors() if n.GetIdx() != other.GetIdx())
+    ranked = _ranked(k, atom.GetIdx(), other.GetIdx())
+    return acyl and len(ranked) == 2 and ranked[0][1] != ranked[1][1]
+
+
+def axis_kind(mol, bond_index: int) -> str:
+    bond = mol.GetBondWithIdx(bond_index)
+    symbols = {bond.GetBeginAtom().GetSymbol(), bond.GetEndAtom().GetSymbol()}
+    if symbols == {"C", "N"}:
+        return "C–N"
+    return "biaryl" if bond.GetBeginAtom().IsInRing() and bond.GetEndAtom().IsInRing() else "other"
+
+
+def stability(mol, bond_index: int) -> str:
+    if axis_kind(mol, bond_index) == "C–N":
+        return ("likely configurationally stable at room temperature, by a rule of thumb (tertiary anilide with both "
+                "ortho positions substituted, as in metolachlor); no rotation barrier was calculated")
+    return ("likely configurationally stable at room temperature, by a rule of thumb (at least three ortho positions "
+            "substituted or fused); no rotation barrier was calculated")
+
+
 def candidate_axes(mol) -> list[int]:
-    """Bond indices of likely stereogenic axes the input leaves unspecified (see the module docstring)."""
+    """Bond indices of likely stereogenic axes the input leaves unspecified (see the module docstring), of two kinds:
+    biaryl-type (a single bond between two sp2 ring atoms) and C–N (an aryl ring on a tertiary amide nitrogen,
+    with both ortho positions substituted by different groups, as in metolachlor's anilide). Plain amides, whose C–N
+    rotation is only slowed, are not axes: the amide C(O)–N bond is never considered."""
     k = _kekule(mol)
     found = []
     for bond in mol.GetBonds():
         if bond.GetBondType() != Chem.BondType.SINGLE or bond.IsInRing() or bond.GetStereo() in ATROP:
             continue
         ends = (bond.GetBeginAtom(), bond.GetEndAtom())
-        if not all(a.IsInRing() and (a.GetIsAromatic() or a.GetHybridization() == Chem.HybridizationType.SP2) for a in ends):
+        sides = [_ring_end(mol, k, atom, other) for atom, other in (ends, ends[::-1])]
+        if all(ok for ok, _ in sides):
+            ortho_count = sum(n for _, n in sides)
+            five = any(mol.GetRingInfo().IsAtomInRingOfSize(a.GetIdx(), 5)
+                       and not mol.GetRingInfo().IsAtomInRingOfSize(a.GetIdx(), 6) for a in ends)
+            if ortho_count >= (4 if five else MIN_ORTHO):
+                found.append(bond.GetIdx())
             continue
-        ortho_count, ok = 0, True
-        for atom, other in (ends, ends[::-1]):
-            ortho = [n.GetIdx() for n in atom.GetNeighbors() if n.GetIdx() != other.GetIdx() and n.GetAtomicNum() > 1]
-            if len(ortho) != 2 or not all(mol.GetBondBetweenAtoms(atom.GetIdx(), o).IsInRing() for o in ortho):
-                ok = False
+        for (ok, ortho), (atom, other) in zip(sides, (ends, ends[::-1])):
+            if ok and ortho == 2 and atom.GetIsAromatic() and _amide_nitrogen(mol, k, other, atom):
+                found.append(bond.GetIdx())
                 break
-            ranked = _ranked(k, atom.GetIdx(), other.GetIdx())
-            if ranked[0][1] == ranked[1][1]:  # e.g. 2,6-dimethylphenyl: the two sides are the same, no chirality
-                ok = False
-                break
-            ortho_count += sum(_ortho_substituted(mol, atom.GetIdx(), o) for o in ortho)
-        five = any(mol.GetRingInfo().IsAtomInRingOfSize(a.GetIdx(), 5) and not mol.GetRingInfo().IsAtomInRingOfSize(a.GetIdx(), 6)
-                   for a in ends)
-        if ok and ortho_count >= (4 if five else MIN_ORTHO):
-            found.append(bond.GetIdx())
     return found
 
 

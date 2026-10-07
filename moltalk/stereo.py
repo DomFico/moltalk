@@ -39,8 +39,14 @@ def assign_cip(mol, atoms=None, bonds=None) -> bool:
 
 def organic_stereo(mol, potential) -> list:
     """Potential stereo elements without metal centres: a four-coordinate metal (e.g. square-planar Fe in heme)
-    is not a tetrahedral stereocentre, although RDKit lists it as one."""
-    return [s for s in potential if not (str(s.type) == "Atom_Tetrahedral" and is_metal(mol.GetAtomWithIdx(s.centeredOn)))]
+    is not a tetrahedral stereocentre, although RDKit lists it as one. Nor are the double bonds of an allene E/Z
+    bonds (RDKit lists them): the allene is one chirality axis, handled in stereounits."""
+    from .stereounits import allenes
+    cumulated = set()
+    for unit in allenes(mol):
+        cumulated |= set(unit["bonds"])
+    return [s for s in potential if not (str(s.type) == "Atom_Tetrahedral" and is_metal(mol.GetAtomWithIdx(s.centeredOn)))
+            and not (str(s.type) == "Bond_Double" and s.centeredOn in cumulated)]
 
 
 def _mirror(mol):

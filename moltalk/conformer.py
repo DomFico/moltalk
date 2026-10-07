@@ -8,12 +8,12 @@ can start from the drawing itself and lift it into 3D.
 import time
 import numpy as np
 from rdkit import Chem
-from rdkit.Chem import AllChem, rdBase, rdCIPLabeler
+from rdkit.Chem import AllChem, rdBase, rdCIPLabeler, rdMolTransforms
 from rdkit.Geometry import Point3D
 from .depiction import _cage, layout
 from .stereo import stereogenic_unspecified, organic_stereo, assign_cip
 from .coordination import is_metal
-from . import atropisomer
+from . import atropisomer, stereounits
 from .depiction import _chelated_metal
 
 EMBED_TIMEOUT_S = 5
@@ -100,7 +100,10 @@ def _square_spiro(mol, conf_id) -> bool:
         axis_b, across_b = unit(vb.sum(axis=0)), vb[0] - vb[1]
         across_b = unit(across_b - (across_b @ axis_b) * axis_b)
         current = np.column_stack([axis_b, across_b, np.cross(axis_b, across_b)])
-        target = np.column_stack([-axis_a, normal_a, np.cross(-axis_a, normal_a)])
+        # Keep ring B's atoms on the side of ring A's plane they are on: always turning them onto one fixed side
+        # rotated ring B by up to 180 degrees, which inverts a chiral spiro system (2,6-dichlorospiro[3.3]heptane).
+        side_sign = 1.0 if across_b @ normal_a >= 0 else -1.0
+        target = np.column_stack([-axis_a, side_sign * normal_a, np.cross(-axis_a, side_sign * normal_a)])
         rot = target @ current.T
         side, todo = set(b), list(b)  # ring B and everything attached to it, not crossing the centre
         while todo:
@@ -127,10 +130,48 @@ def _large_and_flexible(mol) -> bool:
     return rdMolDescriptors.CalcNumRotatableBonds(heavy) >= LARGE_ROTATABLE
 
 
+def _allene_twists(mol) -> list[tuple[int, int, int, int]]:
+    """(ligand, end, end, ligand) for each allene C=C=C, to keep its two ends perpendicular."""
+    kekule = Chem.Mol(mol)
+    try:
+        Chem.Kekulize(kekule, clearAromaticFlags=True)
+    except Exception:  # noqa: BLE001
+        return []
+    found = []
+    for atom in kekule.GetAtoms():
+        doubles = [b for b in atom.GetBonds() if b.GetBondType() == Chem.BondType.DOUBLE]
+        if len(doubles) != 2 or atom.GetDegree() != 2:
+            continue
+        ends = [b.GetOtherAtomIdx(atom.GetIdx()) for b in doubles]
+        ligands = [[n.GetIdx() for n in kekule.GetAtomWithIdx(e).GetNeighbors() if n.GetIdx() != atom.GetIdx()]
+                   for e in ends]
+        if all(ligands) and not any(len([b for b in kekule.GetAtomWithIdx(e).GetBonds()
+                                         if b.GetBondType() == Chem.BondType.DOUBLE]) > 1 for e in ends):
+            found.append((ligands[0][0], ends[0], ends[1], ligands[1][0]))
+    return found
+
+
 def _optimize(mol, method):
     """Force-field clean-up of every conformer on mol. Large molecules get a shorter clean-up: ETKDG geometry is
     already reasonable, and the viewer needs a picture, not an energy minimum (chlorophyll: 1.7 s of MMFF)."""
     iterations = 300 if _large_and_flexible(mol) else 1000
+    twists = _allene_twists(mol)
+    if twists and AllChem.MMFFHasAllMoleculeParams(mol):
+        # MMFF94 and UFF both flatten an allene (their torsion terms across the sp carbon are zero, so 1,4 contacts
+        # win): ETKDG's 84 degrees became 180 for 1,3-dichloroallene, which also destroys its chirality. Hold each
+        # allene's ends perpendicular, keeping the sense ETKDG chose.
+        props = AllChem.MMFFGetMoleculeProperties(mol)
+        results = []
+        for conf in mol.GetConformers():
+            ff = AllChem.MMFFGetMoleculeForceField(mol, props, confId=conf.GetId())
+            for quad in twists:
+                current = rdMolTransforms.GetDihedralDeg(conf, *quad)
+                target = 90.0 if current >= 0 else -90.0
+                ff.MMFFAddTorsionConstraint(*quad, False, target, target, 100.0)
+            ff.Minimize(maxIts=iterations)
+            results.append((0, ff.CalcEnergy()))
+        _store_energies(mol, results)
+        return method + " + MMFF94 (allene ends held perpendicular)"
     if AllChem.MMFFHasAllMoleculeParams(mol):
         results = AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=iterations)
         _store_energies(mol, results)
@@ -180,7 +221,10 @@ def _embed(heavy, conformers=8):
             mol = Chem.AddHs(mol, addCoords=True)
             return mol, _optimize(mol, "spectral cage")
         mol = Chem.AddHs(heavy)
-        params = AllChem.ETKDGv3()
+        # ETKDG's "basic knowledge" keeps aromatic rings flat, which a helicene's twisted rings cannot satisfy: it ran
+        # into the 10 s timeout on [6]helicene, while ETDG embeds it in milliseconds.
+        from .stereounits import helices
+        params = AllChem.ETDG() if helices(heavy) else AllChem.ETKDGv3()
         params.randomSeed = 0xC0FFEE
         params.timeout = EMBED_TIMEOUT_S
         status = -1
@@ -204,7 +248,7 @@ def _embed(heavy, conformers=8):
                 break
         if status < 0:
             raise ValueError("RDKit could not generate 3D coordinates for this structure; use the flat drawing.")
-        return mol, _optimize(mol, "ETKDGv3")
+        return mol, _optimize(mol, "ETDG" if isinstance(params, type(AllChem.ETDG())) and helices(heavy) else "ETKDGv3")
 
 
 # Typical metal–N distances (Å) in tetrapyrrole complexes; the four N are restrained to the square these imply.
@@ -538,6 +582,21 @@ def lone_pair_directions(atom, centre, neighbours, domains):
     return out[:domains]
 
 
+def _same_stereo(mol, conf, reference: str) -> bool:
+    """Does this model's geometry give the input's isomeric SMILES?"""
+    probe = Chem.Mol(mol, confId=conf.GetId())
+    Chem.AssignStereochemistryFrom3D(probe)
+    return Chem.MolToSmiles(Chem.RemoveHs(probe)) == reference
+
+
+def _has_configuration(mol, conf, wanted) -> bool:
+    for unit, sense in wanted:
+        measured = stereounits.measure(mol, conf, unit)
+        if measured is None or measured["sense"] != sense:
+            return False
+    return True
+
+
 def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     """Data for rotating the flat drawing in 3D. mol_in is the parsed input (atom order preserved). drawn_heavy is
     the molecule as drawn without explicit hydrogens (metal–N bonds added for porphyrin-type complexes); drawn is
@@ -601,6 +660,18 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
 
     best = mol = method = None
     started = time.monotonic()
+    # Allenes, helicenes, Xabab spiro atoms whose configuration the input states (from its 3D coordinates).
+    stated_units = stereounits.stated(mol_in)
+    wanted_units = [(u, stated_units[u["key"]]) for u in stereounits.units(mol_in) if u["key"] in stated_units] \
+        if not site else []
+    mirror_ok = not stereounits._other_chirality(mol_in)
+    # An Xaabb spiro system (read with the newer perception): ETKDG does not enforce its tags, so check each model's
+    # stereo against the input's; if every chiral tag belongs to the spiro system, the mirror image fixes a wrong one.
+    spiro_units = stereounits.xaabb(mol_in) if not site else []
+    spiro_reference = Chem.MolToSmiles(mol_in) if any(u["specified"] for u in spiro_units) else None
+    spiro_atoms = set().union(*(set(u["atoms"]) for u in spiro_units)) if spiro_units else set()
+    spiro_mirror_ok = spiro_reference is not None and all(
+        a.GetIdx() in spiro_atoms or a.GetChiralTag() == Chem.ChiralType.CHI_UNSPECIFIED for a in mol_in.GetAtoms())
     # Large molecules (chlorophyll) get one round of a few candidates: each embedding costs ~0.5 s on a desktop and
     # ~1.5 s on Cloud Run, and the refinements below (robust alignment, tail swing, cavity fit) do the shaping.
     rounds = (LARGE_CANDIDATES,) if _large_and_flexible(mol_in) else CANDIDATE_CONFORMERS
@@ -622,6 +693,18 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
         for conf in candidate_mol.GetConformers():
             if lowest is not None and conf.HasProp("energy") and conf.GetDoubleProp("energy") > lowest + ENERGY_WINDOW:
                 continue  # strained (spiropentane: one candidate half-collapsed to 45° fitted the bowtie drawing best)
+            if spiro_reference is not None and not _same_stereo(candidate_mol, conf, spiro_reference):
+                if not spiro_mirror_ok:
+                    continue
+                stereounits._mirror(conf)  # all the chirality is in the spiro system: its mirror image is the one asked
+                if not _same_stereo(candidate_mol, conf, spiro_reference):
+                    continue
+            if wanted_units and not _has_configuration(candidate_mol, conf, wanted_units):
+                if not mirror_ok:
+                    continue  # ETKDG does not know allene or helix configurations: keep only matching conformers
+                stereounits._mirror(conf)  # nothing else is chiral: the mirror image has the stated configuration
+                if not _has_configuration(candidate_mol, conf, wanted_units):
+                    continue
             candidate = evaluate(candidate_mol, conf.GetId())
             if best is None or candidate[0] < best[0]:
                 best = candidate
@@ -631,7 +714,8 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
         # lengths, which looks like a jump); more conformers fix that, within the time budget above.
         # Only small molecules retry for shape: there one misplaced atom is a large part of the picture, while big,
         # flexible ones (heme's side chains) never fit a flat drawing closely and would just take longer.
-        if candidate_mol.GetNumConformers() == 1 or (best[0][0] == 0 and (best[0][2] <= GOOD_FIT or heavy_count > FIT_RETRY_MAX_ATOMS)):
+        if best is not None and (candidate_mol.GetNumConformers() == 1 or (
+                best[0][0] == 0 and (best[0][2] <= GOOD_FIT or heavy_count > FIT_RETRY_MAX_ATOMS))):
             break
     # Long open chains (chlorophyll's phytyl, fatty acids) come out of ETKDG crumpled, often folded back over the
     # rest of the molecule. Straighten them to the extended zigzag, the textbook and low-energy shape that the flat
@@ -657,6 +741,9 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     axial = [entry for entry in atropisomer.describe(mol_in) if entry["verified"]]
     if axial and not site and _optional(atropisomer.enforce, mol, best[1], axial):
         best = evaluate(mol, best[1])
+    if best is None:
+        raise ValueError("No 3D model with the stated allene/helix/spiro configuration could be built; "
+                         "use the flat drawing.")
     (contradicted, _, rmsd), conf_id, xyz, raw, heavy_rot, heavy_scale, vsepr_lone = best
     frame_rot = heavy_rot
     to_heavy_frame = np.eye(3)
@@ -685,6 +772,21 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
                bonds=[bd.GetIdx() for bd in open_pairs if bd is not None])
 
     open_bonds = [sorted(pair) for pair in unspecified_bonds]
+    # Allene and helicene labels on their label bonds: the stated configuration, or the one this model happens to have.
+    unit_labels, open_units = {}, []
+    for unit in stereounits.units(mol_in):
+        if unit["type"] == "spiro":
+            if unit["key"] not in stated_units:
+                open_units.append(unit)
+            continue
+        measured = stereounits.measure(mol, mol.GetConformer(conf_id), unit)
+        a, b = stereounits._label_bond(unit)
+        if unit["key"] in stated_units:
+            unit_labels[tuple(sorted((a, b)))] = (stated_units[unit["key"]], False)
+        else:
+            open_units.append(unit)
+            if measured and measured.get("descriptor"):
+                unit_labels[tuple(sorted((a, b)))] = (measured["descriptor"], True)
     # A hindered axis the input leaves open: the model has one twist; name it (both rules must agree) as arbitrary.
     open_axes = []
     for bond_index in atropisomer.candidate_axes(mol_in):
@@ -709,7 +811,12 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
         source_bond = mol_in.GetBondBetweenAtoms(*pair) if max(pair) < heavy_count else None
         axis = next((x for x in axial if sorted(x["atom_indices"]) == pair), None)
         open_axis = next((x for x in open_axes if x["atom_indices"] == pair), None)
-        if axis is not None:
+        unit_tag = unit_labels.get(tuple(pair))
+        if unit_tag is not None:  # allene M/P, helicene P/M; "arbitrary" when the input leaves it open
+            entry["cip"] = unit_tag[0]
+            if unit_tag[1]:
+                entry["arbitrary"] = True
+        elif axis is not None:
             entry["cip"] = axis["cip"]  # Ra/Sa beside the axis bond, verified against this kind of 3D geometry
         elif open_axis is not None and open_axis["cip"]:
             entry["cip"], entry["arbitrary"] = open_axis["cip"], True
@@ -769,10 +876,13 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     if vsepr:
         result["note"] = result["note"] + " Expanded-octet centres use their VSEPR shape (" + ", ".join(
             drawn.GetAtomWithIdx(c).GetSymbol() for c in vsepr) + ")."
-    if unspecified or unspecified_bonds or open_axes:
+    if unspecified or unspecified_bonds or open_axes or open_units:
         parts = ([f"atom(s) {', '.join(map(str, unspecified))}"] if unspecified else []) + \
                 [f"double bond {a}–{b}" for a, b in unspecified_bonds] + \
-                [f"axis {x['atom_indices'][0]}–{x['atom_indices'][1]} (atropisomer twist)" for x in open_axes]
+                [f"axis {x['atom_indices'][0]}–{x['atom_indices'][1]} (atropisomer twist)" for x in open_axes] + \
+                [f"the {u['type']} unit at atoms {', '.join(map(str, u['atoms'][:4]))}" for u in open_units]
+        if open_units:
+            result["arbitrary_stereo_units"] = [{"type": u["type"], "atoms": u["atoms"]} for u in open_units]
         result["arbitrary_stereo_atoms"] = unspecified
         result["arbitrary_stereo_bonds"] = unspecified_bonds
         if open_axes:

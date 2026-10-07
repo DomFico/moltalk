@@ -55,6 +55,217 @@ def _score(q: dict):
     return (q["bond_crossings"] + q["overlapping_atoms"], q["stretched_bonds"], q["max_bond_length_ratio"])
 
 
+# ---- Layout energy and repair --------------------------------------------------------------------------------------
+# A crowded molecule gets several candidate layouts (RDKit's, RDKit's with random flips, CoordGen's). Each is repaired
+# by a small search over rigid moves and scored; the lowest energy wins. Energy terms, in units of the median bond
+# length L: bond-length deviation beyond 10% (a 3.8x bond costs ~730, so a stretched layout never wins), atoms closer
+# than L (and coincident atoms), an atom lying on a bond it is not part of, bond crossings, uneven bond angles around
+# an atom (an exocyclic bond off the ring's bisector looks like a distorted ring) and ring polygons that are not
+# regular. Moves change coordinates only, never connectivity; the chosen layout's wedges are then checked to encode
+# the same stereochemistry as the input (see stereo_faithful).
+REPAIR_BUDGET_S = 1.5
+_TURNS = np.radians([0, 30, -30, 60, -60, 90, -90, 120, -120, 180])
+
+
+def _energy_context(mol):
+    bonds = np.array([(b.GetBeginAtomIdx(), b.GetEndAtomIdx()) for b in mol.GetBonds()]).reshape(-1, 2)
+    pos = mol.GetConformer().GetPositions()[:, :2]
+    lengths = np.linalg.norm(pos[bonds[:, 0]] - pos[bonds[:, 1]], axis=1) if len(bonds) else np.ones(1)
+    ordinary = [k for k, b in enumerate(mol.GetBonds()) if not _metal_bond(b)]
+    length = float(np.median(lengths[ordinary] if ordinary else lengths)) or 1.0
+    n = mol.GetNumAtoms()
+    far = Chem.GetDistanceMatrix(mol) >= 3  # 1-2 and 1-3 pairs are close by construction
+    centres = {}
+    for atom in mol.GetAtoms():
+        neighbours = [nb.GetIdx() for nb in atom.GetNeighbors()]
+        if len(neighbours) >= 2:
+            centres[atom.GetIdx()] = (neighbours, atom.GetHybridization() == Chem.HybridizationType.SP)
+    incident = np.zeros((n, len(bonds)), dtype=bool)
+    incident[bonds[:, 0], np.arange(len(bonds))] = incident[bonds[:, 1], np.arange(len(bonds))] = True
+    rings = [list(r) for r in mol.GetRingInfo().AtomRings() if len(r) <= 8]
+    # Bond-length targets: metal–ligand bonds may be drawn up to 2.5x (room for bulky ligands, as in drawings of
+    # Pd(PPh3)4); every other bond wants the median length.
+    stretch = np.array([2.5 if _metal_bond(b) else 1.0 for b in mol.GetBonds()])
+    return {"bonds": bonds, "L": length, "far": far, "centres": centres, "incident": incident, "rings": rings,
+            "stretch": stretch}
+
+
+def _metal_bond(bond) -> bool:
+    from .coordination import is_metal
+    return is_metal(bond.GetBeginAtom()) or is_metal(bond.GetEndAtom())
+
+
+def _bond_term(rel, stretch):
+    over = np.where(stretch > 1, np.maximum(0, rel - stretch), np.abs(rel - 1) - 0.1)
+    return 100 * np.sum(np.maximum(0, over) ** 2) + 100 * np.sum(np.maximum(0, 0.9 - rel) ** 2) * (stretch > 1).any()
+
+
+def _crossing_pairs(pos, first, second) -> int:
+    """Proper intersections between bonds in `first` and bonds in `second` (arrays of atom pairs) sharing no atom."""
+    if not len(first) or not len(second):
+        return 0
+    i, j = np.meshgrid(np.arange(len(first)), np.arange(len(second)), indexing="ij")
+    i, j = i.ravel(), j.ravel()
+    f, g = first[i], second[j]
+    disjoint = (f[:, 0] != g[:, 0]) & (f[:, 0] != g[:, 1]) & (f[:, 1] != g[:, 0]) & (f[:, 1] != g[:, 1])
+    f, g = f[disjoint], g[disjoint]
+    p, q, r, t = pos[f[:, 0]], pos[f[:, 1]], pos[g[:, 0]], pos[g[:, 1]]
+
+    def orient(a, c, d):
+        return np.sign((c[:, 0] - a[:, 0]) * (d[:, 1] - a[:, 1]) - (c[:, 1] - a[:, 1]) * (d[:, 0] - a[:, 0]))
+
+    return int(((orient(p, q, r) * orient(p, q, t) < 0) & (orient(r, t, p) * orient(r, t, q) < 0)).sum())
+
+
+def _angle_term(pos, ctx, atoms) -> float:
+    energy = 0.0
+    for i in atoms:
+        if i not in ctx["centres"]:
+            continue
+        neighbours, linear = ctx["centres"][i]
+        w = pos[neighbours] - pos[i]
+        theta = np.sort(np.arctan2(w[:, 1], w[:, 0]))
+        gaps = np.diff(np.append(theta, theta[0] + 2 * np.pi))
+        if len(neighbours) == 2:
+            energy += 10 * (gaps.min() - (np.pi if linear else 2 * np.pi / 3)) ** 2
+        else:
+            energy += 10 * np.sum((gaps - 2 * np.pi / len(neighbours)) ** 2)
+    return energy
+
+
+def _interaction(pos, ctx, inside, outside, bonds_in, bonds_out, bonds_all) -> float:
+    """Non-bonded terms between two atom sets: crowding, atoms on bonds, crossings."""
+    length = ctx["L"]
+    energy = 0.0
+    if len(inside) and len(outside):
+        d = np.linalg.norm(pos[inside][:, None] - pos[outside][None], axis=2) / length
+        mask = ctx["far"][np.ix_(inside, outside)]
+        d = d[mask]
+        energy += 50 * np.sum(d < CLASH) + 30 * np.sum(np.maximum(0, 1 - d) ** 2)
+    bonds = ctx["bonds"]
+    for atoms, bond_ids in ((inside, bonds_out), (outside, bonds_in)):
+        if not len(atoms) or not len(bond_ids):
+            continue
+        p = pos[bonds[bond_ids, 0]]
+        v = pos[bonds[bond_ids, 1]] - p
+        t = np.clip(((pos[atoms][:, None] - p[None]) * v[None]).sum(2) / ((v * v).sum(1)[None] + 1e-12), 0, 1)
+        dist = np.linalg.norm(pos[atoms][:, None] - (p[None] + t[..., None] * v[None]), axis=2) / length
+        dist = dist[~ctx["incident"][np.ix_(atoms, bond_ids)]]
+        energy += 120 * np.sum(np.maximum(0, 0.5 - dist) ** 2)
+    energy += 30 * _crossing_pairs(pos, bonds[bonds_in], bonds[bonds_out])
+    return energy
+
+
+def layout_energy(pos, ctx) -> float:
+    """Total energy (see the section comment)."""
+    bonds, length = ctx["bonds"], ctx["L"]
+    if not len(bonds):
+        return 0.0
+    n = len(pos)
+    rel = np.linalg.norm(pos[bonds[:, 0]] - pos[bonds[:, 1]], axis=1) / length
+    energy = _bond_term(rel, ctx["stretch"])
+    d = np.linalg.norm(pos[:, None] - pos[None], axis=2) / length
+    upper = np.triu(ctx["far"], 1)
+    energy += 50 * np.sum(d[upper] < CLASH) + 30 * np.sum(np.maximum(0, 1 - d[upper]) ** 2)
+    p, v = pos[bonds[:, 0]], pos[bonds[:, 1]] - pos[bonds[:, 0]]
+    t = np.clip(((pos[:, None] - p[None]) * v[None]).sum(2) / ((v * v).sum(1)[None] + 1e-12), 0, 1)
+    to_bond = np.linalg.norm(pos[:, None] - (p[None] + t[..., None] * v[None]), axis=2) / length
+    energy += 120 * np.sum(np.maximum(0, 0.5 - to_bond[~ctx["incident"]]) ** 2)
+    energy += 30 * _crossings(pos, [tuple(b) for b in bonds])
+    energy += _angle_term(pos, ctx, range(n))
+    for ring in ctx["rings"]:
+        q = pos[ring]
+        sides = np.linalg.norm(q - np.roll(q, -1, 0), axis=1) / length
+        a, b = q - np.roll(q, 1, 0), np.roll(q, -1, 0) - q
+        cos = -(a * b).sum(1) / (np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1) + 1e-9)
+        angles = np.arccos(np.clip(cos, -1, 1))
+        energy += 50 * np.sum((sides - 1) ** 2) + 20 * np.sum((angles - np.pi * (len(ring) - 2) / len(ring)) ** 2)
+    return float(energy)
+
+
+def _movable_sides(mol):
+    """For each acyclic bond: (bond index, anchor, joint, atoms of the smaller side beyond the joint)."""
+    sides = []
+    for bond in mol.GetBonds():
+        if bond.IsInRing():
+            continue
+        a, b = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        cut = Chem.RWMol(mol)
+        cut.RemoveBond(a, b)
+        fragments = Chem.GetMolFrags(cut)
+        side = next(f for f in fragments if b in f)
+        if len(side) > mol.GetNumAtoms() / 2:
+            side = next(f for f in fragments if a in f)
+            a, b = b, a
+        sides.append((bond.GetIdx(), a, b, np.array(side)))
+    return sides
+
+
+def repair_layout(mol, budget_s: float = REPAIR_BUDGET_S) -> float:
+    """Greedy search, in place: for each acyclic bond, give it its target length and try the smaller side turned
+    about the anchor atom and mirrored across the bond; take the move that lowers the energy most, and repeat.
+    A rigid move changes only the terms between the moved side and the rest (and the angles at the bond's two
+    atoms), so each trial is scored by that difference alone."""
+    import time
+    ctx = _energy_context(mol)
+    pos = mol.GetConformer().GetPositions()[:, :2].copy()
+    current = layout_energy(pos, ctx)
+    n = mol.GetNumAtoms()
+    bonds = ctx["bonds"]
+    prepared = []
+    for bond_index, a, b, side in _movable_sides(mol):
+        inside_mask = np.zeros(n, dtype=bool)
+        inside_mask[side] = True
+        outside = np.flatnonzero(~inside_mask)
+        in_b = inside_mask[bonds[:, 0]] & inside_mask[bonds[:, 1]]
+        out_b = ~inside_mask[bonds[:, 0]] & ~inside_mask[bonds[:, 1]]
+        bonds_in = np.flatnonzero(in_b | (~in_b & ~out_b))  # the cut bond moves with the side
+        bonds_out = np.flatnonzero(out_b)
+        prepared.append((bond_index, a, b, side, outside, bonds_in, bonds_out))
+
+    def partial(trial, item):
+        bond_index, a, b, side, outside, bonds_in, bonds_out = item
+        rel = np.linalg.norm(trial[a] - trial[b]) / ctx["L"]
+        return (_bond_term(np.array([rel]), ctx["stretch"][[bond_index]]) + _angle_term(trial, ctx, (a, b))
+                + _interaction(trial, ctx, side, outside, bonds_in, bonds_out, None))
+
+    started = time.monotonic()
+    for _ in range(25):
+        best = None
+        for item in prepared:
+            if time.monotonic() - started > budget_s:
+                break
+            bond_index, a, b, side = item[:4]
+            limit = ctx["stretch"][bond_index]
+            current_rel = np.linalg.norm(pos[b] - pos[a]) / ctx["L"]
+            targets = {min(max(current_rel, 1.0), limit)} | ({1.0, 1.75, limit} if limit > 1 else {1.0})
+            base = partial(pos, item)
+            anchor = pos[a]
+            bond_len = np.linalg.norm(pos[b] - anchor) or 1.0
+            u = (pos[b] - anchor) / bond_len
+            normal = np.array([-u[1], u[0]])
+            shapes = []
+            for target in sorted(targets):
+                rel = pos[side] - anchor - u * (bond_len - target * ctx["L"])
+                shapes += [rel, np.outer(rel @ u, u) - np.outer(rel @ normal, normal)]
+            for shape in shapes:
+                for turn in _TURNS:
+                    c, s_ = np.cos(turn), np.sin(turn)
+                    trial = pos.copy()
+                    trial[side] = anchor + shape @ np.array([[c, s_], [-s_, c]])
+                    delta = partial(trial, item) - base
+                    if delta < -1e-6 and (best is None or delta < best[0]):
+                        best = (delta, trial)
+        if best is None:
+            break
+        pos = best[1]
+        current += best[0]
+    conf = mol.GetConformer()
+    for i, (x, y) in enumerate(pos):
+        conf.SetAtomPosition(i, Point3D(float(x), float(y), 0.0))
+    return layout_energy(pos, ctx)
+
+
 def _cage(mol) -> list[int]:
     """Atoms of the largest fused ring system (rings sharing atoms); the part Tutte can embed."""
     systems = []
@@ -230,6 +441,134 @@ def _shorten_bridges(mol):
             return
         for i, p in zip(moved, best[1]):
             conf.SetAtomPosition(int(i), Point3D(float(p[0]), float(p[1]), 0.0))
+
+
+MAX_RATIO = 1.5  # a conventional drawing's longest bond; above this the candidate search runs
+
+
+def _best_candidate(mol, current_q) -> dict:
+    """Crowded (BINAP, Xantphos, rubrene): candidate layouts, each repaired; the lowest-energy one that encodes the
+    input's stereochemistry replaces the current layout (in place). Returns its quality."""
+    candidates = [Chem.Mol(mol)]
+    sampled = Chem.Mol(mol)
+    with rdBase.BlockLogs():
+        rdDepictor.Compute2DCoords(sampled, nFlipsPerSample=2, nSample=100, sampleSeed=7, permuteDeg4Nodes=True)
+    candidates.append(sampled)
+    coordgen = Chem.Mol(mol)
+    if _coordgen(coordgen):
+        candidates.append(coordgen)
+    hub = _hub_layout(mol)
+    if hub is not None:
+        candidates.append(hub)
+    # Each candidate as made (CoordGen with its stretched bridges pulled in, as before) and repaired: repair lowers the
+    # energy, which can trade a crossing for shorter bonds; the acceptance rule below decides.
+    if len(candidates) > 2:
+        _shorten_bridges(candidates[2])
+    trials = []
+    for candidate in candidates:
+        raw = Chem.Mol(candidate)
+        trials.append((layout_energy(raw.GetConformer().GetPositions()[:, :2], _energy_context(raw)), raw))
+        # Big molecules (cyclic peptides, 100+ atoms) get a third of the time: CoordGen alone takes seconds there.
+        budget = REPAIR_BUDGET_S if mol.GetNumAtoms() <= 60 else REPAIR_BUDGET_S / 3
+        trials.append((repair_layout(candidate, budget / len(candidates)), candidate))
+    best = None
+    for energy, candidate in trials:
+        if not stereo_faithful(candidate):
+            continue  # never trade stereochemistry for looks
+        q = quality(candidate)
+        # Never more crossings or overlaps than the current layout (a bridged ring traded for a crossing is not an
+        # improvement), and something must actually improve.
+        if q["bond_crossings"] > current_q["bond_crossings"] or q["overlapping_atoms"] > current_q["overlapping_atoms"] \
+                or _score(q) >= _score(current_q):
+            continue
+        key = (q["bond_crossings"] + q["overlapping_atoms"], q["stretched_bonds"], energy)
+        if best is None or key < best[0]:
+            best = (key, candidate, q)
+    if best is None:
+        return current_q
+    q = best[2]
+    mol.RemoveAllConformers()
+    mol.AddConformer(Chem.Conformer(best[1].GetConformer()), assignId=True)
+    return q
+
+
+def _hub_layout(mol):
+    """A candidate for star-shaped molecules (Pd(PPh3)4, Wilkinson's catalyst, tetraphenylmethane): each branch around
+    the most central branching atom is laid out on its own, then the branches are set evenly around that atom, each
+    pointing outward. None when the molecule has no such hub."""
+    hub, best = None, 0
+    for atom in mol.GetAtoms():
+        if atom.GetDegree() < 3 or atom.IsInRing():
+            continue
+        cut = Chem.RWMol(mol)
+        cut.RemoveAtom(atom.GetIdx())
+        smallest = min(len(f) for f in Chem.GetMolFrags(cut))
+        if smallest > best:
+            hub, best = atom.GetIdx(), smallest
+    if hub is None or best < 2:
+        return None
+    neighbours = [n.GetIdx() for n in mol.GetAtomWithIdx(hub).GetNeighbors()]
+    cut = Chem.RWMol(mol)
+    cut.RemoveAtom(hub)
+    branches = [[i if i < hub else i + 1 for i in frag] for frag in Chem.GetMolFrags(cut)]
+    pos = np.zeros((mol.GetNumAtoms(), 2))
+    order = []
+    for branch in branches:
+        anchors = [n for n in neighbours if n in branch]
+        order += [(neighbours.index(a), a, branch) for a in anchors[:1]]
+    order.sort()
+    for k, (_, anchor, branch) in enumerate(order):
+        # The branch with the hub atom attached, so its own layout leaves room for the bond to the hub.
+        keep = set(branch) | {hub}
+        piece = Chem.RWMol(mol)
+        for i in sorted(set(range(mol.GetNumAtoms())) - keep, reverse=True):
+            piece.RemoveAtom(i)
+        piece = piece.GetMol()
+        members = sorted(keep)
+        try:
+            piece.UpdatePropertyCache(strict=False)
+            Chem.GetSymmSSSR(piece)
+            with rdBase.BlockLogs():
+                rdDepictor.Compute2DCoords(piece)
+        except Exception:  # noqa: BLE001
+            return None
+        local = dict(zip(members, piece.GetConformer().GetPositions()[:, :2]))
+        angle = 2 * np.pi * k / len(order) + np.pi / 2
+        direction = np.array([np.cos(angle), np.sin(angle)])
+        bond = local[anchor] - local[hub]
+        scale = 1.5 / (np.linalg.norm(bond) or 1.0)
+        turn = np.arctan2(direction[1], direction[0]) - np.arctan2(bond[1], bond[0])
+        c, s_ = np.cos(turn), np.sin(turn)
+        for i in branch:
+            pos[i] = ((local[i] - local[hub]) * scale) @ np.array([[c, s_], [-s_, c]])
+    conf = Chem.Conformer(mol.GetNumAtoms())
+    for i, (x, y) in enumerate(pos):
+        conf.SetAtomPosition(i, Point3D(float(x), float(y), 0.0))
+    out = Chem.Mol(mol)
+    out.RemoveAllConformers()
+    out.AddConformer(conf, assignId=True)
+    return out
+
+
+def stereo_faithful(mol) -> bool:
+    """Do this layout's wedges (as RDKit would draw them) read back as the input's stereochemistry? Written as a
+    molfile with these coordinates and read again; compared on canonical isomeric SMILES plus axial twists."""
+    from .atropisomer import stereo_key
+    has_stereo = any(a.GetChiralTag() != Chem.ChiralType.CHI_UNSPECIFIED for a in mol.GetAtoms()) or \
+        any(b.GetStereo() != Chem.BondStereo.STEREONONE for b in mol.GetBonds())
+    if not has_stereo:
+        return True
+    try:
+        with rdBase.BlockLogs():
+            back = Chem.MolFromMolBlock(Chem.MolToMolBlock(mol), removeHs=False)
+        return back is not None and stereo_key(back) == stereo_key(mol)
+    except Exception:  # noqa: BLE001 - cannot check: do not claim it is faithful
+        return False
+
+
+def _is_helicene(mol) -> bool:
+    from .stereounits import helices
+    return bool(helices(mol))
 
 
 def _has_macrocycle(mol, size=12) -> bool:
@@ -525,17 +864,24 @@ def layout(mol) -> dict:
             mol.RemoveAllConformers()
             mol.AddConformer(Chem.Conformer(chosen[1].GetConformer()), assignId=True)
             best_q = chosen[0]
-    if best_q["bond_crossings"] or best_q["overlapping_atoms"] or best_q["stretched_bonds"]:
-        # Crowded (BINAP, Xantphos, rubrene): try CoordGen, then pull in any bond it had to stretch.
+    if (best_q["bond_crossings"] or best_q["overlapping_atoms"] or best_q["stretched_bonds"]
+            or best_q["max_bond_length_ratio"] > MAX_RATIO):
+        best_q = _best_candidate(mol, best_q)
+    result = {"method": "rdkit", **best_q}
+    if (best_q["bond_crossings"] or best_q["overlapping_atoms"]) and _is_helicene(mol):
+        # A flat helicene ([6] and up) overlaps its end rings. A view of its 3D shape (as for cages) is the textbook
+        # picture: the end rings side by side, slightly foreshortened. A projection has no depth, so it implies
+        # neither P nor M; the label gives the handedness.
         trial = Chem.Mol(mol)
-        if _coordgen(trial):
-            _shorten_bridges(trial)
+        try:
+            _project_cage(trial)
             q = quality(trial)
-            if _score(q) < _score(best_q):
+            if q["bond_crossings"] + q["overlapping_atoms"] < best_q["bond_crossings"] + best_q["overlapping_atoms"]:
                 mol.RemoveAllConformers()
                 mol.AddConformer(Chem.Conformer(trial.GetConformer()), assignId=True)
-                best_q = q
-    result = {"method": "rdkit", **best_q}
+                return {"method": "projection", "helicene": True, **q}
+        except Exception:  # noqa: BLE001 - no 3D model: keep the flat layout
+            pass
     if not (best_q["bond_crossings"] or best_q["stretched_bonds"] or best_q["overlapping_atoms"]):
         return result
     # A cage cannot be drawn flat without crossings: draw it as a view of its 3D shape instead. A merely crowded

@@ -15,7 +15,7 @@ from .export import export_structure as write_structure, MAX_EMBED_BYTES
 from .limits import runner
 from .naming import name_and_locants, pubchem_slot
 
-WIDGET_URI = "ui://widget/molecule-v30.html"
+WIDGET_URI = "ui://widget/molecule-v31.html"
 WIDGET_MIME = "text/html;profile=mcp-app"
 WIDGET_HTML = files("moltalk").joinpath("widget/molecule.html").read_text(encoding="utf-8")
 
@@ -30,7 +30,7 @@ INSTRUCTIONS = """RDKit chemistry tools. Workflow rules:
 - If a tool returns an error, report it; never substitute or invent a different structure.
 - If resolve_name cannot resolve a name (unknown, ambiguous, or stereo not stated), do not write a SMILES for it from memory. Tell the user what the tool said and ask for a structure, a SMILES or a more specific name. Only if the user then asks you to proceed from your own knowledge may you write the SMILES; say plainly that it is unverified by MolTalk.
 - When the user wants a structure file (ChemDraw, MOL, SDF, PDB, XYZ, SMILES), call export_structure with the verified canonical_smiles; default format cdxml for ChemDraw. 2D files use the drawing's layout; 3D files (mol/sdf with coordinates="3d", pdb, xyz) use one calculated conformer. Relay its warnings: a 3D file fixes an arbitrary configuration at any stereocentre the input leaves unspecified. The file is offered to the user by the inline viewer's Download button; do not paste the file contents unless asked.
-- Atropisomers (axial chirality, e.g. BINAP, BINOL): plain SMILES cannot state the twist. stereo_summary.unspecified_axes lists hindered axes left open; enumerate_stereoisomers returns each atropisomer as CXSMILES (coordinates plus an axis wedge) with a verified Ra/Sa (Ra = M, Sa = P). Pass that CXSMILES unchanged to draw_molecule or export_structure. Axial descriptors are reported only when verified (axial_stereo[].verified); never infer them. A name with an axial descriptor, such as (R)-BINAP, is not resolved.
+- Stereochemistry beyond R/S and E/Z is reported in analysis.stereo_units (type tetrahedral, double_bond, axis [biaryl or C–N atropisomers], allene, spiro, helix), each with specified/configuration/descriptor/verification/stability. Plain SMILES cannot state an axis twist, an allene's or helicene's configuration, or an Xabab spiro atom: stereo_summary lists open ones (unspecified_axes, unspecified_units), and enumerate_stereoisomers returns each configuration as CXSMILES (coordinates included). Pass that CXSMILES unchanged to draw_molecule or export_structure. Report descriptors only from these results (shown only when verified); never infer one, and say when a unit has no descriptor. Stability is a separate field: a unit being stereogenic does not mean its isomers are isolable. A name with an axial or helical descriptor, such as (R)-BINAP or (P)-hexahelicene, is not resolved.
 - When you pass label= to draw_molecule, use the compound's name only if the SMILES came from resolve_name for that name (or the user gave it). draw_molecule checks the label against MolTalk's library: if label_check.status is "mismatch", the drawing is NOT that compound; say so and do not present it under that name."""
 
 HOST = os.getenv("HOST", "127.0.0.1")
@@ -109,9 +109,12 @@ async def draw_molecule(smiles: str, label: str | None = None, width: int = 640,
     centers = ", ".join((f"C{c['locant']} (atom {c['atom_index']})" if c.get("locant") else f"atom {c['atom_index']}") + f" {c['cip']}"
                         for c in a["stereocenters"]) or "none assigned"
     wedges = " ".join(b["explanation"] for b in result["depicted_stereo_bonds"]) or "no wedge/dash bonds in this drawing."
-    axial = "; ".join(f"bond {x['atom_indices'][0]}-{x['atom_indices'][1]} "
-                      + (f"{x['cip']} (= {x['helicity']}, verified)" if x["verified"] else "twist specified, descriptor unverified")
-                      for x in a.get("axial_stereo", []))
+    axial = "; ".join(f"{u['type']}{' (' + u['subtype'] + ')' if u.get('subtype') else ''} at atoms "
+                      f"{', '.join(map(str, u['atoms'][:4]))}{'…' if len(u['atoms']) > 4 else ''}: "
+                      + (f"{u['descriptor']}" + (f" (= {u['alternative_descriptor']})" if u.get("alternative_descriptor") else "")
+                         + f", {u['verification']}" if u["descriptor"] else
+                         (f"{u['configuration']} (no descriptor: {u.get('note', 'unverified')})" if u["specified"] else "not specified"))
+                      for u in a.get("stereo_units", []) if u["type"] not in ("tetrahedral", "double_bond"))
     if naming["iupac_name"]:
         name_text = f"IUPAC name: {naming['iupac_name']} ({naming['name_source']}, exact structure match). "
         name_text += ("Drawing numbered with its parent-structure locants. " if shown == "iupac"
@@ -123,9 +126,10 @@ async def draw_molecule(smiles: str, label: str | None = None, width: int = 640,
         name_text = f"WARNING: {check['message']} " + name_text
     elif check and check["status"] == "stereo differs":
         name_text = f"Note: {check['message']} " + name_text
-    text = (f"Rendered {label or a['canonical_smiles']} inline for the user (already displayed; do not call again to show it). "
-            f"Drew {label or a['canonical_smiles']} ({a['formula']}); canonical SMILES {a['canonical_smiles']}. " + name_text +
-            f"CIP centers (zero-based input indices): {centers}. " + (f"Chirality axes: {axial}. " if axial else "") +
+    short = a["canonical_smiles"].split(" |")[0]  # a CXSMILES's coordinates are written once, below
+    text = (f"Rendered {label or short} inline for the user (already displayed; do not call again to show it). "
+            f"Drew {label or short} ({a['formula']}); canonical SMILES {a['canonical_smiles']}. " + name_text +
+            f"CIP centers (zero-based input indices): {centers}. " + (f"Other stereogenic units: {axial}. " if axial else "") +
             f"Stereo: {a['stereo_summary']['status']}. "
             f"Drawing: {wedges} Functional-group motifs: {', '.join(a['functional_groups']) or 'none matched'}.")
     depiction = result["depiction"]
@@ -228,7 +232,7 @@ async def find_substructure(smiles: str, smarts: str) -> dict[str, Any]:
 
 @mcp.tool(annotations=READ_ONLY, meta=_ui_meta("Enumerating stereoisomers…", "Stereoisomers shown"))
 async def enumerate_stereoisomers(smiles: str, limit: int = 16) -> CallToolResult:
-    """Enumerate unspecified atom/bond stereochemistry and the twist of hindered biaryl-type axes (atropisomers; specified elements are preserved) and show the isomers inline as a grid. Each isomer has CIP labels (input atom indices), verified axial descriptors (Ra/Sa), an achiral/meso flag and its enantiomer's index. Atropisomers are given as CXSMILES, which carry the twist; pass them unchanged to draw_molecule."""
+    """Enumerate unspecified stereochemistry (specified elements are preserved): R/S, E/Z, the twist of hindered biaryl and C–N axes, and the configuration of allenes, helicenes and Xabab spiro atoms. Shows the isomers inline as a grid. Each isomer has CIP labels (input atom indices), stereo_units with verified descriptors, an achiral/meso flag and its enantiomer's index. Isomers that plain SMILES cannot state are given as CXSMILES (with coordinates); pass them unchanged to draw_molecule."""
     result = await runner.run(enumerate_stereo, smiles, limit, True)
     svgs = result.pop("svgs")
     isomers = result["isomers"]
@@ -236,7 +240,9 @@ async def enumerate_stereoisomers(smiles: str, limit: int = 16) -> CallToolResul
     for iso in isomers:
         cip = ", ".join([f"atom {c['atom_index']} {c['cip']}" for c in iso["stereocenters"]]
                         + [f"axis {x['atom_indices'][0]}-{x['atom_indices'][1]} {x['cip'] or 'unverified'}"
-                           for x in iso.get("axial_stereo", [])]) or "no CIP centers"
+                           for x in iso.get("axial_stereo", [])]
+                        + [f"{u['type']} {u['descriptor'] or u['configuration']}" for u in iso.get("stereo_units", [])
+                           if u["specified"]]) or "no CIP centers"
         relation = "achiral/meso" if iso["achiral"] else (f"enantiomer of #{iso['enantiomer_index']}"
                                                           if iso["enantiomer_index"] is not None else "chiral")
         lines.append(f"#{iso['index']} {iso['smiles']} ({cip}; {relation})")
