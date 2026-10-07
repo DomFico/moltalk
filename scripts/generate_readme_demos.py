@@ -28,10 +28,10 @@ from playwright.async_api import async_playwright
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "assets" / "demo"
-FPS = 20
+FPS = 16
 SECONDS = 6
 WIDTH = 640  # output width cap in pixels
-PAD = 18
+PAD = 14
 
 # name: (tool, arguments, options). "isomer" picks an enumerate_stereoisomers result by its axial descriptor.
 DEMOS = {
@@ -133,6 +133,9 @@ async def render(client, page, html, name, tool, args, options, frames_dir):
         await frame.get_by_role("button", name="Show lone pairs").click()
     if not await inner.evaluate("() => window.moltalkViewer.ensureModel()"):
         raise SystemExit(f"{name}: no 3D model")
+    # No canvas border or shadow in the recording, so frames crop to the molecule itself.
+    await inner.evaluate("() => { const b = document.querySelector('.liftable'); b.style.border = 'none';"
+                         " b.style.boxShadow = 'none'; b.style.borderRadius = '0'; }")
     # Lift fully into 3D (no turn), then pose each frame of one loop period.
     await inner.evaluate(TURN, [0, 0, 200])
     count = FPS * SECONDS
@@ -166,7 +169,7 @@ def crop_and_encode(name, paths):
     OUT.mkdir(parents=True, exist_ok=True)
     scale = f"scale={width}:-2:flags=lanczos"
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(FPS), "-i", pattern, "-vf",
-                    f"{scale},split[a][b];[a]palettegen=max_colors=64:stats_mode=diff[p];"
+                    f"{scale},split[a][b];[a]palettegen=max_colors=48:stats_mode=diff[p];"
                     f"[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle",
                     "-loop", "0", str(OUT / f"{name}.gif")], check=True)
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(FPS), "-i", pattern, "-vf", scale,
@@ -193,7 +196,7 @@ async def main(names):
             for name in names:
                 tool, args, options = DEMOS[name]
                 print(name)
-                page = await browser.new_page(viewport={"width": 760, "height": 940})  # a fresh page per demo
+                page = await browser.new_page(viewport={"width": 760, "height": 940}, device_scale_factor=1.6)  # fresh page; crisp
                 await page.expose_function("pyCallTool", call_tool)
                 with tempfile.TemporaryDirectory() as tmp:
                     paths = await render(client, page, html, name, tool, args, options, Path(tmp))
