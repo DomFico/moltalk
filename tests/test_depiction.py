@@ -148,3 +148,12 @@ def test_separate_cyanide_is_bonded_to_cobalt_in_b12():
     mol, note = depiction_mol(library.find_name("cyanocobalamin")[1]["smiles"])
     metal, donors = _chelated_metal(mol)
     assert {n.GetSymbol() for n in mol.GetAtomWithIdx(metal).GetNeighbors()} == {"N", "C"} and "ligand is bonded" in note
+
+
+@pytest.mark.parametrize("name", ["BINAP", "Xantphos", "rubrene"])
+def test_crowded_polyaryls_have_no_overlaps(name):
+    # RDKit's own engine put BINAP's PPh2 groups on top of the naphthalenes (red close-contact boxes everywhere);
+    # CoordGen is tried for crowded layouts.
+    from moltalk import library
+    depiction = draw(library.find_name(name)[1]["smiles"], 640, 420, False)["depiction"]
+    assert depiction["bond_crossings"] == 0 and depiction["overlapping_atoms"] == 0

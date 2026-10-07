@@ -189,3 +189,48 @@ def test_double_bond_labels_follow_the_stereo_setting():
                 await browser.close()
 
     asyncio.run(run())
+
+
+def test_lone_pairs_turn_with_the_molecule_and_charges_sit_outside():
+    async def run():
+        params = StdioServerParameters(command=sys.executable, args=["-m", "moltalk.server"])
+        async with stdio_client(params) as (read, write), ClientSession(read, write) as client:
+            await client.initialize()
+            html = (await client.read_resource(WIDGET_URI)).contents[0].text
+
+            async def py_call_tool(raw):
+                request = json.loads(raw)
+                return json.dumps(dump(await client.call_tool(request["name"], request["arguments"])))
+
+            async with playwright_api.async_playwright() as pw:
+                channel = os.getenv("MOLTALK_UI_BROWSER_CHANNEL", "chrome")
+                browser = await pw.chromium.launch(channel=None if channel == "chromium" else channel)
+                page = await browser.new_page(viewport={"width": 760, "height": 1000})
+                await page.expose_function("pyCallTool", py_call_tool)
+                await page.set_content(EXPORT_HOST)
+                frame = page.frame_locator("#w")
+                inner = page.frames[1]
+                args = {"smiles": "CC(=O)[O-]", "label": "acetate"}
+                result = dump(await client.call_tool("draw_molecule", args))
+                await page.evaluate("([h, a, r]) => startWidget(h, a, r, 'light')", [html, args, result])
+                box = frame.locator(".liftable")
+                await box.wait_for()
+                await frame.get_by_role("button", name="Show lone pairs").click()
+                # Flat: RDKit's raised minus sign is replaced by one drawn outside the dots.
+                assert await inner.evaluate("() => document.querySelectorAll('[data-charge-glyph]').length") >= 1
+                assert await inner.evaluate("() => [...document.querySelectorAll('g.lone-pairs text')].map(t => t.textContent).join('')") == "−"
+                # Rotated: the dots move as the molecule turns, by different amounts on different sides (fixed in 3D).
+                await box.focus()
+                await box.press("ArrowRight")
+                lift = frame.locator("svg.lift")
+                await lift.locator("circle.lp-dot").first.wait_for()
+                dots = "s => [...s.querySelectorAll('circle.lp-dot')].map(c => [+c.getAttribute('cx'), +c.getAttribute('cy')])"
+                before = await lift.evaluate(dots)
+                for _ in range(6):
+                    await box.press("ArrowDown")
+                after = await lift.evaluate(dots)
+                assert len(before) == len(after) == 10  # 2 + 3 pairs
+                assert before != after
+                await browser.close()
+
+    asyncio.run(run())

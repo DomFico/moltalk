@@ -160,6 +160,78 @@ def _best_view(xyz, heavy_bonds, heavy_ids):
     return (flat - flat[heavy_ids].mean(axis=0)) @ vt.T * (1.5 / bond)
 
 
+def _coordgen(mol) -> bool:
+    """CoordGen's layout (in place), at its best precision: it resolves crowding that RDKit's own engine cannot
+    (BINAP: RDKit put both PPh2 groups on top of the naphthalenes, 9 crossings and 10 overlaps)."""
+    from rdkit.Chem import rdCoordGen
+    params = rdCoordGen.CoordGenParams()
+    params.minimizerPrecision = params.sketcherBestPrecision
+    try:
+        with rdBase.BlockLogs():
+            rdCoordGen.AddCoords(mol, params)
+        return True
+    except Exception:  # noqa: BLE001 - CoordGen cannot lay out some structures (metals); keep the other layout
+        return False
+
+
+def _shorten_bridges(mol):
+    """CoordGen avoids overlaps partly by stretching a connecting bond (BINAP's biaryl bond 3.8x, Xantphos's C-P
+    3.4x). For each stretched bond outside rings, bring the smaller side back to a normal bond length, trying turns
+    about the joint, and keep the first placement that adds no crossings or overlaps."""
+    conf = mol.GetConformer()
+    for _ in range(4):
+        pos = conf.GetPositions()[:, :2]
+        lengths = {b.GetIdx(): np.linalg.norm(pos[b.GetBeginAtomIdx()] - pos[b.GetEndAtomIdx()]) for b in mol.GetBonds()}
+        median = float(np.median(list(lengths.values()))) if lengths else 1.0
+        stretched = [b for b in mol.GetBonds() if not b.IsInRing() and lengths[b.GetIdx()] > STRETCH * median]
+        if not stretched:
+            return
+        bond = max(stretched, key=lambda b: lengths[b.GetIdx()])
+        a, b = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        side = {b}
+        todo = [b]
+        while todo:
+            for n in mol.GetAtomWithIdx(todo.pop()).GetNeighbors():
+                if n.GetIdx() not in side and not (todo == [] and n.GetIdx() == a and len(side) == 1) and n.GetIdx() != a:
+                    side.add(n.GetIdx()); todo.append(n.GetIdx())
+        if a in side:
+            return
+        if len(side) > mol.GetNumAtoms() / 2:  # move the smaller side
+            side = set(range(mol.GetNumAtoms())) - side
+            a, b = b, a
+        before = quality(mol)
+        moved = sorted(side)
+        rel = pos[moved] - pos[b]
+        direction = (pos[b] - pos[a]) / lengths[bond.GetIdx()]
+        best = None
+        # Mirror image of the side as well: a 2D drawing may be flipped (wedges are recomputed from the stereo).
+        along = direction
+        across = np.array([-along[1], along[0]])
+        mirrored = np.column_stack([rel @ along, -(rel @ across)]) @ np.vstack([along, across])
+        for flip, shape in ((False, rel), (True, mirrored)):
+          for turn in np.radians(np.arange(0, 360, 15)):
+            c, s_ = np.cos(turn), np.sin(turn)
+            rot = np.array([[c, -s_], [s_, c]])
+            d = rot @ direction
+            new_b = pos[a] + median * d
+            # Turn the side with its bond, so it keeps its shape relative to the bond direction.
+            placed = new_b + shape @ rot.T
+            trial = Chem.Mol(mol)
+            tconf = trial.GetConformer()
+            for i, p in zip(moved, placed):
+                tconf.SetAtomPosition(int(i), Point3D(float(p[0]), float(p[1]), 0.0))
+            q = quality(trial)
+            if q["bond_crossings"] <= before["bond_crossings"] and q["overlapping_atoms"] <= before["overlapping_atoms"] \
+                    and q["stretched_bonds"] < before["stretched_bonds"]:
+                key = (q["bond_crossings"] + q["overlapping_atoms"], flip, min(turn, 2 * np.pi - turn))
+                if best is None or key < best[0]:
+                    best = (key, placed)
+        if best is None:
+            return
+        for i, p in zip(moved, best[1]):
+            conf.SetAtomPosition(int(i), Point3D(float(p[0]), float(p[1]), 0.0))
+
+
 def _has_macrocycle(mol, size=12) -> bool:
     """A ring of at least `size` atoms (porphyrin inner ring 16, corrole 15, crown ethers, macrolides)."""
     Chem.GetSymmSSSR(mol)
@@ -453,6 +525,16 @@ def layout(mol) -> dict:
             mol.RemoveAllConformers()
             mol.AddConformer(Chem.Conformer(chosen[1].GetConformer()), assignId=True)
             best_q = chosen[0]
+    if best_q["bond_crossings"] or best_q["overlapping_atoms"] or best_q["stretched_bonds"]:
+        # Crowded (BINAP, Xantphos, rubrene): try CoordGen, then pull in any bond it had to stretch.
+        trial = Chem.Mol(mol)
+        if _coordgen(trial):
+            _shorten_bridges(trial)
+            q = quality(trial)
+            if _score(q) < _score(best_q):
+                mol.RemoveAllConformers()
+                mol.AddConformer(Chem.Conformer(trial.GetConformer()), assignId=True)
+                best_q = q
     result = {"method": "rdkit", **best_q}
     if not (best_q["bond_crossings"] or best_q["stretched_bonds"] or best_q["overlapping_atoms"]):
         return result

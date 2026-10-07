@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 from moltalk.chemistry import analyze, conformer, draw
 from test_depiction import C60
@@ -148,3 +149,19 @@ def test_big_rigid_aromatic_macrocycle_comes_out_flat():
     centred = xyz - xyz.mean(axis=0)
     normal = np.linalg.svd(centred)[2][2]
     assert np.sqrt(((centred @ normal) ** 2).mean()) < 1.1
+
+
+@pytest.mark.parametrize("smiles", ["C1=CC12C=C2", "C1CC12CC2", "C1=CC12CC2"])
+def test_small_spiro_rings_are_perpendicular(smiles):
+    # MMFF twists spiropentadiene to 56 deg (and rates that lower in energy); one spiropentane candidate collapsed to
+    # 45 deg and fitted the bowtie drawing best. Small spiro centres are now set to the real D2d shape.
+    import numpy as np
+    from rdkit import Chem
+    from moltalk.chemistry import conformer
+    xyz = np.array([a["xyz"] for a in conformer(smiles, False)["atoms"]])
+    base = Chem.MolFromSmiles(smiles)
+    normals = []
+    for ring in base.GetRingInfo().AtomRings():
+        p = xyz[list(ring)] - xyz[list(ring)].mean(axis=0)
+        normals.append(np.linalg.svd(p)[2][2])
+    assert abs(normals[0] @ normals[1]) < 0.1

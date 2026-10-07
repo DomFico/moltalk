@@ -590,20 +590,30 @@
     return Math.max(0, Math.min(tx, ty));
   }
   // box: the atom label's extent {x0, y0, x1, y1} and its glyph height h; dots sit just outside it.
-  function drawElectrons(group, x, y, info, neighbourAngles, hLeft, box, colour, fixedAngles) {
+  // Flat placement of an atom's electron domains: [{angle, dots: [[x, y], ...]}], pairs first, then a radical.
+  function electronDots(x, y, info, neighbourAngles, hLeft, box) {
     const occupied = neighbourAngles.slice();
     if (info.h) occupied.push(hLeft ? Math.PI : 0);  // the "H"/"H2" written beside the symbol
-    // The charge sign needs no blocked direction: it is inside the label box, and dots sit outside the box.
     const total = info.pairs + (info.radicals ? 1 : 0);
-    const angles = fixedAngles && fixedAngles.length === total ? fixedAngles : freeAngles(total, occupied);
+    const angles = freeAngles(total, occupied);
     const h = box.h, gap = 0.32 * h, dot = Math.max(1.6, 0.095 * h), pad = 0.14 * h;
-    angles.forEach((angle, k) => {
+    return angles.map((angle, k) => {
       const r = toEdge(x, y, box, angle) + pad + dot;
       const cx = x + r * Math.cos(angle), cy = y + r * Math.sin(angle);
       const px = -Math.sin(angle), py = Math.cos(angle);
-      const dots = k < info.pairs ? [[cx + px * gap / 2, cy + py * gap / 2], [cx - px * gap / 2, cy - py * gap / 2]] : [[cx, cy]];
-      for (const [dx, dy] of dots) group.append(svgEl("circle", { cx: dx.toFixed(1), cy: dy.toFixed(1), r: dot.toFixed(2), fill: colour, class: "lp-dot" }));
+      return { angle, dots: k < info.pairs ? [[cx + px * gap / 2, cy + py * gap / 2], [cx - px * gap / 2, cy - py * gap / 2]] : [[cx, cy]] };
     });
+  }
+  function drawDots(group, domains, h, colour) {
+    const dot = Math.max(1.6, 0.095 * h);
+    for (const d of domains) for (const [dx, dy] of d.dots) {
+      group.append(svgEl("circle", { cx: dx.toFixed(1), cy: dy.toFixed(1), r: dot.toFixed(2), fill: colour, class: "lp-dot" }));
+    }
+  }
+  function drawElectrons(group, x, y, info, neighbourAngles, hLeft, box, colour) {
+    const domains = electronDots(x, y, info, neighbourAngles, hLeft, box);
+    drawDots(group, domains, box.h, colour);
+    return domains;
   }
 
   // Geometry of a painted element, for deciding whether an eraser (halo or label backing) touches it.
@@ -896,6 +906,7 @@
     }
     // Lone pairs on the flat drawing: an overlay in the RDKit SVG's own coordinates (so zoom and pan apply).
     updateLonePairs() {
+      this.flatSvg.querySelectorAll("[data-charge-glyph]").forEach((n) => { n.style.display = ""; });
       const old = this.flatSvg.querySelector("g.lone-pairs");
       if (old) old.remove();
       if (showLonePairs && this.data.lone_pairs) {
@@ -913,7 +924,8 @@
           // Which side RDKit wrote the H on: the label box reaches further that way (H3O+ vs OH-).
           const box = this.flatLabelBox(i, x, y);
           const hLeft = x - box.x0 > box.x1 - x;
-          drawElectrons(g, x, y, info, angles, hLeft, box, ELEMENT_COLORS[this.elementOf(i)] || INK);
+          const domains = drawElectrons(g, x, y, info, angles, hLeft, box, ELEMENT_COLORS[this.elementOf(i)] || INK);
+          if (info.charge) this.chargeOutside(g, i, x, y, info.charge, angles.concat(domains.map((d) => d.angle)), box);
         }
         this.flatSvg.append(g);
       }
@@ -1045,6 +1057,34 @@
       }
     }
 
+    // With lone pairs shown, a charge is written outside the dots, like an exponent: RDKit's own superscript sign
+    // (the small glyph raised above the atom's centre) is hidden and the charge is drawn in the largest open gap
+    // around the atom, nearest the upper right, beyond the dots.
+    chargeOutside(g, i, x, y, charge, taken, box) {
+      const glyphs = [...this.flatSvg.querySelectorAll(`path[class="atom-${i}"]`)].map((n) => ({ n, b: n.getBBox() }));
+      const tallest = Math.max(0, ...glyphs.map(({ b }) => b.height));
+      for (const { n, b } of glyphs) {
+        if (b.y + b.height / 2 < y - 0.2 * tallest && b.height < 0.8 * tallest) {
+          n.style.display = "none";
+          n.setAttribute("data-charge-glyph", "1");
+        }
+      }
+      const full = 2 * Math.PI, wanted = -Math.PI / 4;
+      const sorted = taken.map((a) => ((a % full) + full) % full).sort((p, q) => p - q);
+      let best = wanted, bestScore = -Infinity;
+      sorted.forEach((a, k) => {
+        const next = k + 1 < sorted.length ? sorted[k + 1] : sorted[0] + full, size = next - a, mid = a + size / 2;
+        const score = size - 0.5 * Math.abs(Math.atan2(Math.sin(mid - wanted), Math.cos(mid - wanted)));
+        if (score > bestScore) { bestScore = score; best = mid; }
+      });
+      const h = box.h, r = toEdge(x, y, box, best) + 0.14 * h + 2 * Math.max(1.6, 0.095 * h) + 0.45 * h;
+      const t = svgEl("text", { x: (x + r * Math.cos(best)).toFixed(1), y: (y + r * Math.sin(best)).toFixed(1),
+        "text-anchor": "middle", "dominant-baseline": "central", "font-size": (0.75 * h).toFixed(1),
+        "font-family": "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", fill: ELEMENT_COLORS[this.elementOf(i)] || INK });
+      t.textContent = (Math.abs(charge) > 1 ? Math.abs(charge) : "") + (charge > 0 ? "+" : "−");
+      g.append(t);
+    }
+
     flatLabelBox(i, x, y) {
       // RDKit draws each atom label as paths with class "atom-<i>"; their union is the label's exact box.
       let box = null;
@@ -1166,6 +1206,48 @@
       return { symbol: atom.element, h: atom.h, hLeft: neighbours.length > 0 && mean > 0, charge: atom.charge };
     }
 
+    // Fixed 3D geometry for the rotated view, computed once per model: the most open direction around each atom
+    // (where charges and R/S or number tags sit, like a hydrogen would), a fixed 3D axis to split each lone pair's two
+    // dots along, and each double bond's in-plane offset. Everything then turns with the molecule instead of
+    // keeping a fixed place on screen.
+    geometry() {
+      if (this.geo) return this.geo;
+      const m = this.model, xyz = m.atoms.map((a) => a.xyz);
+      const sub = (u, v) => [u[0] - v[0], u[1] - v[1], u[2] - v[2]];
+      const add = (u, v) => [u[0] + v[0], u[1] + v[1], u[2] + v[2]];
+      const dot = (u, v) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+      const cross = (u, v) => [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+      const len = (u) => Math.hypot(u[0], u[1], u[2]);
+      const unit = (u) => { const l = len(u); return l > 1e-9 ? [u[0] / l, u[1] / l, u[2] / l] : null; };
+      const anyPerp = (u) => unit(cross(u, Math.abs(u[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0]));
+      const lps = m.lone_pair_dirs || {};
+      const open = [], pairAxes = [];
+      m.atoms.forEach((_, i) => {
+        const bonds = this.neighbours[i].map((j) => unit(sub(xyz[j], xyz[i]))).filter(Boolean);
+        const dirs = lps[String(i)] || [];
+        let o = [0, 0, 0];
+        for (const v of bonds.concat(dirs)) o = sub(o, v);
+        if (len(o) < 0.25) o = dirs.length >= 2 ? add(dirs[0], dirs[1]) : bonds.length ? anyPerp(bonds[0]) : [0.7, 0.7, 0.3];
+        open.push(unit(o) || [0.7, 0.7, 0]);
+        pairAxes.push(dirs.map((d, k) => unit(cross(d, bonds[0] || dirs[(k + 1) % dirs.length] || [0, 0, 1])) || anyPerp(d)));
+      });
+      const ringCentre = m.rings.map((ring) => ring.reduce((acc, i) => add(acc, xyz[i].map((v) => v / ring.length)), [0, 0, 0]));
+      const bondOffset = m.bonds.map((b) => {
+        if (b.order !== 2) return null;
+        const u = unit(sub(xyz[b.b], xyz[b.a]));
+        let v = null;
+        if (b.ring != null) v = sub(ringCentre[b.ring], xyz[b.a]);
+        else {
+          const sa = this.neighbours[b.a].find((j) => j !== b.b), sb = this.neighbours[b.b].find((j) => j !== b.a);
+          if (sa != null) v = sub(xyz[sa], xyz[b.a]); else if (sb != null) v = sub(xyz[sb], xyz[b.b]);
+        }
+        if (!v || !u) return null;
+        return unit(sub(v, u.map((c) => c * dot(v, u))));
+      });
+      this.geo = { open, pairAxes, bondOffset };
+      return this.geo;
+    }
+
     paint() {
       const m = this.model;
       if (!m) return;
@@ -1176,6 +1258,15 @@
       const pts = this.project();
       const R = this.R;
       const s = this.s, zoom = 1 + (this.fit - 1) * s;  // labels and line spacing follow the fit-to-canvas scale
+      const geo = this.geometry();
+      // A 3D direction (model frame) as seen on screen now (y down); its length shrinks as it turns toward the viewer.
+      const turn = (v) => [R[0][0] * v[0] + R[0][1] * v[1] + R[0][2] * v[2], -(R[1][0] * v[0] + R[1][1] * v[1] + R[1][2] * v[2])];
+      // Keep a turned offset at least `least` long, growing continuously toward `fallback` as it shortens, so a
+      // label never sits on its atom when its direction points at the viewer.
+      const atLeast = (vx, vy, least, fx, fy) => {
+        const l = Math.hypot(vx, vy);
+        return l >= least ? [vx, vy] : [vx + fx * (least - l), vy + fy * (least - l)];
+      };
       const fs = this.fs * zoom, bondPx = this.bondPx * zoom;
       const labels = m.atoms.map((a, i) => this.label(a, pts, i));
       const ringCentre = m.rings.map((ring) => {
@@ -1183,7 +1274,7 @@
         for (const i of ring) { x += pts[i].x; y += pts[i].y; }
         return { x: x / ring.length, y: y / ring.length };
       });
-      const items = m.bonds.map((b) => ({ depth: (pts[b.a].z + pts[b.b].z) / 2, bond: b }));
+      const items = m.bonds.map((b, bi) => ({ depth: (pts[b.a].z + pts[b.b].z) / 2, bond: b, bi }));
       m.atoms.forEach((_, i) => items.push({ depth: pts[i].z + 1e-4, atom: i }));
       items.sort((p, q) => p.depth - q.depth);
 
@@ -1221,21 +1312,32 @@
           if (len <= ta + tb + 2) continue;
           const x1 = p.x + ux * ta, y1 = p.y + uy * ta, x2 = q.x - ux * tb, y2 = q.y - uy * tb;
           const gap = 0.16 * bondPx;
-          let lines;  // [offset along the normal, shorten-at-both-ends fraction]
-          if (order === 2 && ring != null) {
-            const cx = ringCentre[ring].x - (p.x + q.x) / 2, cy = ringCentre[ring].y - (p.y + q.y) / 2;
-            lines = [[0, 0], [Math.sign(cx * nx + cy * ny || 1) * gap, 0.16]];
-          } else if (order === 2) {
-            lines = [[-gap / 2, 0], [gap / 2, 0]];
+          let lines;  // [offset x, offset y, shorten-at-both-ends fraction]
+          let second = null;  // a double bond's offset vector (screen px)
+          if (order === 2) {
+            // Flat: toward the ring centre (ring bonds) or a fixed side. Rotated: the bond's own plane, fixed in 3D,
+            // so seen edge-on the two lines close up as a real double bond would (never below 35% of the gap).
+            let fx = nx * gap, fy = ny * gap;
+            if (ring != null) {
+              const cx = ringCentre[ring].x - (p.x + q.x) / 2, cy = ringCentre[ring].y - (p.y + q.y) / 2;
+              const sign = Math.sign(cx * nx + cy * ny || 1);
+              fx *= sign; fy *= sign;
+            }
+            const off3 = geo.bondOffset[item.bi];
+            let [tx, ty] = off3 ? turn(off3) : [fx / gap, fy / gap];
+            [tx, ty] = atLeast(tx * gap, ty * gap, 0.35 * gap, Math.sign(fx * nx + fy * ny || 1) * nx, Math.sign(fx * nx + fy * ny || 1) * ny);
+            second = [fx + (tx - fx) * s, fy + (ty - fy) * s];
+            lines = ring != null ? [[0, 0, 0], [second[0], second[1], 0.16]]
+              : [[-second[0] / 2, -second[1] / 2, 0], [second[0] / 2, second[1] / 2, 0]];
           } else if (order >= 3) {
-            lines = [[-gap, 0], [0, 0], [gap, 0]];
+            lines = [[-gap * nx, -gap * ny, 0], [0, 0, 0], [gap * nx, gap * ny, 0]];
           } else {
-            lines = [[0, 0]];
+            lines = [[0, 0, 0]];
           }
           // Halo: a background-coloured stroke under the middle of the bond cuts a gap in bonds behind it.
           if (s > 0.02) {
             const keep = Math.min(0.3 * len, 0.22 * bondPx) + 1;
-            const spread = Math.max(...lines.map(([o]) => Math.abs(o)));
+            const spread = Math.max(...lines.map(([ox, oy]) => Math.hypot(ox, oy)));
             if (len - ta - tb > 2 * keep) line(p.x + ux * (ta + keep), p.y + uy * (ta + keep), q.x - ux * (tb + keep), q.y - uy * (tb + keep),
                  "#ffffff", 2 * spread + 7, 1).setAttribute("data-erase", "1");
           }
@@ -1246,16 +1348,24 @@
               [hx - ux * size - nx * size * 0.45, hy - uy * size - ny * size * 0.45]].map((pt) => pt.map((v) => v.toFixed(1)).join(",")).join(" "),
               fill: colour(b) }));
           }
-          for (const [off, shorten] of lines) {
+          for (const [ox, oy, shorten] of lines) {
             const cut = shorten * len;
-            halves(x1 + nx * off + ux * cut, y1 + ny * off + uy * cut, x2 + nx * off - ux * cut, y2 + ny * off - uy * cut,
+            halves(x1 + ox + ux * cut, y1 + oy + uy * cut, x2 + ox - ux * cut, y2 + oy - uy * cut,
                    a, b, 2 * zoom, opacity);  // RDKit's 2-unit lines, shrunk with the model so they keep their weight
           }
           // E/Z beside the double bond, under the same Stereo setting as R/S.
           const ez = item.bond.cip && (item.bond.arbitrary ? stereoLabels === "all" : stereoLabels !== "off");
           if (ez) {
-            const side = (gap + 0.45 * fs) * (ny > 0 ? -1 : 1);  // above the bond on screen
-            const tag = svgEl("text", { x: ((p.x + q.x) / 2 + nx * side).toFixed(1), y: ((p.y + q.y) / 2 + ny * side).toFixed(1),
+            // On the open side of the double bond (away from its ring or substituents), turning with it.
+            const flatSide = (gap + 0.45 * fs) * (ny > 0 ? -1 : 1);
+            let ex = nx * flatSide, ey = ny * flatSide;
+            if (second) {
+              const l = Math.hypot(second[0], second[1]) || 1;
+              const away = ring != null ? 1 : 0.5;
+              const [tx, ty] = atLeast(-second[0] / l * (gap * away + 0.45 * fs), -second[1] / l * (gap * away + 0.45 * fs), 0.45 * fs, nx, ny);
+              ex = ex + (tx - ex) * s; ey = ey + (ty - ey) * s;
+            }
+            const tag = svgEl("text", { x: ((p.x + q.x) / 2 + ex).toFixed(1), y: ((p.y + q.y) / 2 + ey).toFixed(1),
               "text-anchor": "middle", "dominant-baseline": "central", "font-size": Math.max(8, 0.55 * fs).toFixed(1),
               "font-family": "system-ui, sans-serif", fill: "#555555" });
             tag.textContent = item.bond.arbitrary ? `(arb. ${item.bond.cip})` : `(${item.bond.cip})`;
@@ -1293,29 +1403,74 @@
                 width: hw.toFixed(1), height: (1.2 * fs).toFixed(1), fill: "#ffffff", "data-erase": "1" }));
               text(lab.hLeft ? p.x - w / 2 : p.x + w / 2, lab.hLeft ? "end" : "start", hText, fs);
             }
-            if (lab.charge) {
-              const c = (Math.abs(lab.charge) > 1 ? Math.abs(lab.charge) : "") + (lab.charge > 0 ? "+" : "−");
-              text(p.x + w / 2 + (lab.h && !lab.hLeft ? 0.62 * fs * 1.4 : 0), "start", [[c, "sup"]], fs);
-            }
           }
+          // The whole label's box (symbol and any H text), so dots, charges and tags clear all of it.
+          const symW = lab ? 0.62 * fs * lab.symbol.length : 0.4 * fs;
+          const hW = lab && lab.h ? 0.62 * fs * (lab.h > 1 ? 1.6 : 1) : 0;
+          const lbox = { x0: p.x - symW / 2 - (lab && lab.hLeft ? hW : 0), x1: p.x + symW / 2 + (lab && !lab.hLeft ? hW : 0),
+                         y0: p.y - 0.5 * fs, y1: p.y + 0.5 * fs, h: fs };
+          const edge = (vx, vy) => toEdge(p.x, p.y, lbox, Math.atan2(vy, vx));  // centre to box edge, along (vx, vy)
+          const labelR = lab ? 0.32 * fs * Math.max(1.5, lab.symbol.length) : 0.2 * fs;
+          const open = turn(geo.open[i]);
           const electronInfo = showLonePairs && this.data.lone_pairs && this.data.lone_pairs[String(i)];
-          if (electronInfo) {
+          const hasPairs = electronInfo && (electronInfo.pairs || electronInfo.radicals);
+          // Charge: flat, written as a superscript after the symbol; rotated, in the atom's most open direction (and
+          // beyond its lone pairs, like an exponent), turning with the molecule.
+          const chargeValue = lab && lab.charge ? lab.charge : (atom.charge || 0);
+          if (chargeValue && (lab || hasPairs)) {
+            const c = (Math.abs(chargeValue) > 1 ? Math.abs(chargeValue) : "") + (chargeValue > 0 ? "+" : "−");
+            const w = lab ? 0.62 * fs * lab.symbol.length : 0;
+            const flatX = w / 2 + (lab && lab.h && !lab.hLeft ? 0.62 * fs * 1.4 : 0) + 0.3 * fs, flatY = -0.35 * fs;
+            const dist = edge(open[0], open[1]) + (hasPairs ? 0.65 * fs : 0.35 * fs);
+            const [ax, ay] = atLeast(open[0] * dist, open[1] * dist, edge(0.7071, -0.7071) + 0.3 * fs, 0.7071, -0.7071);
+            const t = svgEl("text", { x: (p.x + flatX + (ax - flatX) * s).toFixed(1), y: (p.y + flatY + (ay - flatY) * s).toFixed(1),
+              "text-anchor": "middle", "dominant-baseline": "central", "font-size": (0.7 * fs).toFixed(1),
+              "font-family": "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", fill: ELEMENT_COLORS[atom.element] || INK });
+            t.textContent = c;
+            g.append(t);
+          }
+          if (hasPairs) {
             const angles = this.neighbours[i].map((j) => Math.atan2(pts[j].y - p.y, pts[j].x - p.x));
             const w = lab ? 0.62 * fs * lab.symbol.length : 0.6 * fs;
             const hw = lab && lab.h ? 0.62 * fs * (lab.h > 1 ? 1.6 : 1) : 0;
-            const charge = lab && lab.charge ? 0.45 * fs : 0;
-            const box = { x0: p.x - w / 2 - (lab && lab.hLeft ? hw : 0), x1: p.x + w / 2 + (lab && !lab.hLeft ? hw : 0) + charge,
-                          y0: p.y - 0.5 * fs - (charge ? 0.2 * fs : 0), y1: p.y + 0.5 * fs, h: fs };
-            // Real 3D directions (VSEPR from the conformer), turned with the molecule; screen y points down.
+            const box = { x0: p.x - w / 2 - (lab && lab.hLeft ? hw : 0), x1: p.x + w / 2 + (lab && !lab.hLeft ? hw : 0),
+                          y0: p.y - 0.5 * fs, y1: p.y + 0.5 * fs, h: fs };
+            const flat = electronDots(p.x, p.y, electronInfo, angles, lab ? lab.hLeft : false, box);
+            // Rotated: each pair is a fixed object in 3D, like a hydrogen. It sits along its VSEPR direction, its two
+            // dots split along a fixed 3D axis; seen end-on it sits over the atom, as a hydrogen pointing at you would.
             const dirs = (m.lone_pair_dirs || {})[String(i)] || [];
-            let endOn = false;
-            let turned = dirs.map(([x, y, z]) => {
-              const rx = R[0][0] * x + R[0][1] * y + R[0][2] * z, ry = R[1][0] * x + R[1][1] * y + R[1][2] * z;
-              if (Math.hypot(rx, ry) < 0.35) endOn = true;  // pointing at (or away from) the viewer
-              return Math.atan2(-ry, rx);
-            });
-            if (endOn) turned = null;  // a pair seen end-on has no meaningful screen direction: use the 2D spacing
-            drawElectrons(g, p.x, p.y, electronInfo, angles, lab ? lab.hLeft : false, box, ELEMENT_COLORS[atom.element] || INK, turned);
+            const axes = geo.pairAxes[i] || [];
+            let domains = flat;
+            if (dirs.length === flat.length && s > 0) {
+              // Pair each flat domain with the 3D direction it starts as (the model is aligned to the drawing).
+              if (!this.pairing) this.pairing = {};
+              if (!this.pairing[i]) {
+                const left = dirs.map((d, k) => k), order = [];
+                for (const f of flat) {
+                  let best = 0, bestD = Infinity;
+                  left.forEach((k, idx) => {
+                    const a = Math.atan2(-dirs[k][1], dirs[k][0]);
+                    const d = Math.abs(Math.atan2(Math.sin(a - f.angle), Math.cos(a - f.angle)));
+                    if (d < bestD) { bestD = d; best = idx; }
+                  });
+                  order.push(left.splice(best, 1)[0]);
+                }
+                this.pairing[i] = order;
+              }
+              const h = fs, gapDots = 0.32 * h, extra = 0.14 * h + Math.max(1.6, 0.095 * h) + 0.15 * h;
+              domains = flat.map((f, n) => {
+                const k = this.pairing[i][n];
+                const [dx, dy] = turn(dirs[k]), [qx, qy] = turn(axes[k] || [0, 0, 1]);
+                // Out to the label's edge in this direction and a little beyond, scaled by how much the pair points
+                // across the screen (so one pointing at the viewer sits over its atom, like a hydrogen would).
+                const reach = edge(dx, dy) + extra;
+                const cx = p.x + dx * reach, cy = p.y + dy * reach;
+                const target = f.dots.length === 2
+                  ? [[cx + qx * gapDots / 2, cy + qy * gapDots / 2], [cx - qx * gapDots / 2, cy - qy * gapDots / 2]] : [[cx, cy]];
+                return { dots: f.dots.map(([fx, fy], j) => [fx + (target[j][0] - fx) * s, fy + (target[j][1] - fy) * s]) };
+              });
+            }
+            drawDots(g, domains, fs, ELEMENT_COLORS[atom.element] || INK);
           }
           const tags = [];
           if (this.numbering === "iupac" && this.locants[String(i)]) tags.push(this.locants[String(i)]);
@@ -1325,7 +1480,15 @@
           const showCip = atom.cip && (atom.arbitrary ? stereoLabels === "all" : stereoLabels !== "off");
           if (showCip) tags.push(atom.arbitrary ? `(arb. ${atom.cip})` : `(${atom.cip})`);
           if (tags.length) {
-            const tag = svgEl("text", { x: (p.x + 0.45 * fs).toFixed(1), y: (p.y - 0.55 * fs).toFixed(1),
+            // Flat: up and to the right, as before. Rotated: in the atom's most open direction (for a stereocentre,
+            // usually where its hidden hydrogen points), turning with the molecule.
+            const dist = edge(open[0], open[1]) + (chargeValue ? 1.1 * fs : 0.5 * fs);
+            const [ax, ay] = atLeast(open[0] * dist, open[1] * dist, edge(0.7071, -0.7071) + 0.4 * fs, 0.7071, -0.7071);
+            const text = tags.join(" ");
+            const fx = 0.45 * fs + 0.15 * fs * text.length, fy = -0.75 * fs;  // the flat spot, as a centre
+            const tx = fx + (ax - fx) * s, ty = fy + (ay - fy) * s;
+            const tag = svgEl("text", { x: (p.x + tx).toFixed(1), y: (p.y + ty).toFixed(1),
+              "text-anchor": "middle", "dominant-baseline": "central",
               "font-size": Math.max(8, 0.55 * fs).toFixed(1), "font-family": "system-ui, sans-serif", fill: "#555555", "fill-opacity": op });
             tag.textContent = tags.join(" ");
             if (showCip && atom.arbitrary) {

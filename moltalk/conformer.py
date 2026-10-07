@@ -54,6 +54,66 @@ def _spectral_sphere(mol, cage, bond_length=1.42):
     return pos * (bond_length / mean)
 
 
+def _store_energies(mol, results):
+    for conf, (_, energy) in zip(mol.GetConformers(), results):
+        conf.SetDoubleProp("energy", float(energy))
+
+
+ENERGY_WINDOW = 8.0  # kcal/mol above the best candidate; a strained, half-collapsed shape can fit a flat drawing better
+
+
+def _spiro_centres(mol):
+    """(centre, ring-A neighbours, ring-B neighbours) for spiro atoms joining two small rings (3- or 4-membered)."""
+    Chem.GetSymmSSSR(mol)
+    rings = [set(r) for r in mol.GetRingInfo().AtomRings()]
+    found = []
+    for atom in mol.GetAtoms():
+        i = atom.GetIdx()
+        mine = [r for r in rings if i in r]
+        if len(mine) != 2 or mine[0] & mine[1] != {i} or max(len(r) for r in mine) > 4:
+            continue
+        a = [n.GetIdx() for n in atom.GetNeighbors() if n.GetIdx() in mine[0]]
+        b = [n.GetIdx() for n in atom.GetNeighbors() if n.GetIdx() in mine[1]]
+        if len(a) == 2 and len(b) == 2:
+            found.append((i, a, b))
+    return found
+
+
+def _square_spiro(mol, conf_id) -> bool:
+    """A spiro carbon joining two small rings has them perpendicular, on a straight axis (spiropentane,
+    spiropentadiene: D2d). MMFF and UFF get spiropentadiene wrong (MMFF even rates a twisted 56° shape lower in
+    energy, and pulls back against restraints), so set it geometrically: rotate ring B, with everything attached to
+    it, rigidly about the spiro centre so its axis points straight away from ring A and its plane is perpendicular
+    to ring A's. Bond lengths and each ring's own shape are unchanged."""
+    from rdkit.Geometry import Point3D
+    centres = _spiro_centres(mol)
+    if not centres:
+        return False
+    conf = mol.GetConformer(conf_id)
+    pos = conf.GetPositions()
+    unit = lambda v: v / np.linalg.norm(v)
+    for c, a, b in centres:
+        va, vb = pos[a] - pos[c], pos[b] - pos[c]
+        axis_a = unit(va.sum(axis=0))
+        normal_a = unit(np.cross(va[0], va[1]))
+        axis_b, across_b = unit(vb.sum(axis=0)), vb[0] - vb[1]
+        across_b = unit(across_b - (across_b @ axis_b) * axis_b)
+        current = np.column_stack([axis_b, across_b, np.cross(axis_b, across_b)])
+        target = np.column_stack([-axis_a, normal_a, np.cross(-axis_a, normal_a)])
+        rot = target @ current.T
+        side, todo = set(b), list(b)  # ring B and everything attached to it, not crossing the centre
+        while todo:
+            for n in mol.GetAtomWithIdx(todo.pop()).GetNeighbors():
+                if n.GetIdx() != c and n.GetIdx() not in side:
+                    side.add(n.GetIdx()); todo.append(n.GetIdx())
+        if side & set(a):
+            continue  # the rings are also joined elsewhere: not a simple spiro centre
+        for i in side:
+            conf.SetAtomPosition(i, Point3D(*(rot @ (pos[i] - pos[c]) + pos[c])))
+        pos = conf.GetPositions()
+    return True
+
+
 def _large_and_flexible(mol) -> bool:
     """The speed shortcut (fewer candidates, shorter force-field clean-up) is for big molecules with long flexible
     chains (chlorophyll; erythromycin has 7 rotatable bonds), which are slow. A big rigid aromatic one (naphthalocyanine) is fast anyway and needs the
@@ -71,10 +131,12 @@ def _optimize(mol, method):
     already reasonable, and the viewer needs a picture, not an energy minimum (chlorophyll: 1.7 s of MMFF)."""
     iterations = 300 if _large_and_flexible(mol) else 1000
     if AllChem.MMFFHasAllMoleculeParams(mol):
-        AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=iterations)
+        results = AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=iterations)
+        _store_energies(mol, results)
         return method + " + MMFF94"
     if AllChem.UFFHasAllMoleculeParams(mol):
-        AllChem.UFFOptimizeMoleculeConfs(mol, maxIters=iterations)
+        results = AllChem.UFFOptimizeMoleculeConfs(mol, maxIters=iterations)
+        _store_energies(mol, results)
         return method + " + UFF"
     return method
 
@@ -552,7 +614,13 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
             raise
         if site:
             candidate_method += ", ring embedded as the free base"
+        energies = [c.GetDoubleProp("energy") for c in candidate_mol.GetConformers() if c.HasProp("energy")]
+        # Not for porphyrin-type macrocycles: MMFF rates a bowed naphthalocyanine 37 kcal/mol *below* the flat one, and
+        # the flattest-ring preference already picks the right shape there.
+        lowest = min(energies) if energies and not macrocycle else None
         for conf in candidate_mol.GetConformers():
+            if lowest is not None and conf.HasProp("energy") and conf.GetDoubleProp("energy") > lowest + ENERGY_WINDOW:
+                continue  # strained (spiropentane: one candidate half-collapsed to 45° fitted the bowtie drawing best)
             candidate = evaluate(candidate_mol, conf.GetId())
             if best is None or candidate[0] < best[0]:
                 best = candidate
@@ -577,6 +645,8 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
         candidate = evaluate(unfolded, best[1])
         if candidate[0][0] <= best[0][0] and candidate[0][2] < best[0][2]:
             best, mol = candidate, unfolded
+    if _optional(_square_spiro, mol, best[1]):
+        best = evaluate(mol, best[1])
     # Last, so no later unrestrained minimisation undoes it; only the chosen conformer, as it costs a minimisation.
     if site and _optional(_square_cavity, mol, site, drawn_heavy, best[1]):
         best = evaluate(mol, best[1])

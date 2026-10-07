@@ -23,7 +23,7 @@ moltalk  (.venv/bin/moltalk → RDKit worker processes with time/memory limits)
 | Install in an isolated venv (`.venv`, Python 3.12, RDKit 2026.03.6, mcp 1.30.0) | **Verified** |
 | Test suite: 106 tests (104 offline by default; 2 live PubChem tests need `MOLTALK_NETWORK_TESTS=1`), including live PubChem and real-browser tests of the drawing, its 3D rotation, zoom, hydrogens and a phone touch screen | **Verified** (`pytest`) |
 | Tools and widget through official MCP clients (Python SDK over stdio/HTTP, MCP Inspector CLI) | **Verified** |
-| UI resource metadata (`ui://widget/molecule-v26.html`, `text/html;profile=mcp-app`, `_meta.ui.resourceUri` + `openai/outputTemplate`) | **Verified** |
+| UI resource metadata (`ui://widget/molecule-v27.html`, `text/html;profile=mcp-app`, `_meta.ui.resourceUri` + `openai/outputTemplate`) | **Verified** |
 | Widget rendering in a sandboxed iframe through the MCP Apps bridge, plus a follow-up `tools/call` from the widget | **Verified** in Chrome with a host harness that imitates ChatGPT (`tests/test_widget_ui.py`, `tests/test_widget_3d.py`) |
 | tunnel-client → stdio server path | **Verified** with tunnel-client's local control plane (`scripts/local-tunnel-test.sh`) |
 | Name resolution: bundled library (22,038 compounds), OPSIN for systematic names, live PubChem fallback | **Verified** (`tests/test_library.py`; PubChem with `MOLTALK_NETWORK_TESTS=1`) |
@@ -121,7 +121,7 @@ The widget's **Hide/Show atom indices** button redraws the structure through a f
 | Start automatically at login (optional) | `systemctl --user enable moltalk-tunnel` |
 | Remove the service | `scripts/uninstall-service.sh`. To also remove the key and profile: `rm -r ~/.config/moltalk` |
 
-After changing tool metadata or the widget: restart (`scripts/start.sh`), then in ChatGPT open the plugin under **Plugins** → **Refresh**, and start a new chat. If you change the widget substantially, bump the version in its URI (`molecule-v26` → `v27`), because ChatGPT caches templates.
+After changing tool metadata or the widget: restart (`scripts/start.sh`), then in ChatGPT open the plugin under **Plugins** → **Refresh**, and start a new chat. If you change the widget substantially, bump the version in its URI (`molecule-v27` → `v28`), because ChatGPT caches templates.
 
 ### If the Tunnel option is unavailable
 
@@ -140,7 +140,7 @@ A public HTTPS endpoint is the documented alternative. ChatGPT accepts only **OA
 | `conformer_3d(smiles)` | viewer-only | one calculated 3D conformer aligned to the flat drawing, for rotating it (hidden from the model) |
 | `resolve_name(name, allow_network)` | no | structure from the bundled library, OPSIN or (opt-in) PubChem, with source, CID, title, IUPAC name, `stereo_summary` and warnings; ambiguous or unknown names are errors |
 
-**UI component.** `moltalk/widget/molecule.html` is registered as `ui://widget/molecule-v26.html` (`text/html;profile=mcp-app`) with an empty CSP allowlist, so it makes no network requests. It uses the MCP Apps bridge (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`, `ui/notifications/size-changed`) and falls back to `window.openai`. The SVG is sent only in the result's `_meta`, which ChatGPT passes to the widget but not to the model; the chemistry data stays in `structuredContent` for the model. The SVG is sanitized before insertion. Pass `include_svg=true` for clients without UI support.
+**UI component.** `moltalk/widget/molecule.html` is registered as `ui://widget/molecule-v27.html` (`text/html;profile=mcp-app`) with an empty CSP allowlist, so it makes no network requests. It uses the MCP Apps bridge (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`, `ui/notifications/size-changed`) and falls back to `window.openai`. The SVG is sent only in the result's `_meta`, which ChatGPT passes to the widget but not to the model; the chemistry data stays in `structuredContent` for the model. The SVG is sanitized before insertion. Pass `include_svg=true` for clients without UI support.
 
 **Rotate the drawing in 3D.** Grab the flat drawing and drag (one finger on a phone). Over the first ~90 px it lifts off the page into 3D and keeps rotating as a chemical drawing:
 - **Drawing style:** flat colour, implicit carbons, element labels with their hydrogens (OH/HO, NH₂) in RDKit's colours, half-coloured bonds, ring double bonds on the inner side, and gaps where a bond passes in front of another.
@@ -194,6 +194,12 @@ Rebuild the library with `.venv/bin/python scripts/build_library.py` (network, J
 
 **Downloads and privacy.** Both kinds of export use MCP Apps' standard `ui/download-file` when the host advertises `downloadFile` (the host usually asks the user to confirm). Otherwise the widget tries an ordinary browser download, and also opens a small panel: right-click or long-press the image to save it, or copy the file text. That panel works even where the sandbox blocks downloads. The structure never goes into a URL; the file content travels in the tool result (`_meta`, plus a standard embedded resource for hosts without the viewer). Which route ChatGPT and Claude take has to be checked in each app.
 
+**Labels and lone pairs in the rotated view.** Lone pairs, charges, R/S and E/Z labels, atom numbers and double bonds are fixed in 3D and turn with the molecule, as hydrogens do, instead of keeping a fixed place on screen.
+- **Lone pairs:** each pair lies along its VSEPR direction, out past the edge of its label, with its two dots split along a fixed 3D axis. A pair pointing at the viewer sits over its atom, as a hydrogen would.
+- **Charges, R/S and numbers:** they sit in the atom's most open direction (away from its bonds and lone pairs; for a stereocentre, usually where its hidden hydrogen points), with charges beyond any lone pairs. A minimum offset keeps them off the label when that direction points at the viewer.
+- **Double bonds:** the second line lies in the plane of the double bond (toward its ring or substituents). Seen edge-on, the two lines close up to 35% of the gap, but never merge. E/Z labels sit on the bond's open side.
+- **Flat drawing:** with lone pairs shown, a charge is written outside the dots, like an exponent. RDKit's raised sign is hidden, and the charge is drawn in the largest free gap nearest the upper right.
+
 **Lone pairs.** **Show lone pairs** draws Lewis-structure dots on the flat and rotated views, instantly, with no server call. The setting survives redraws.
 - **Count:** for each atom, take its valence electrons, subtract its formal charge, subtract one electron per bond (hidden hydrogens included; aromatic rings counted in a Kekulé form), subtract a pair for each dative bond it donates, subtract any unpaired electrons, then halve. Unpaired electrons are drawn as single dots.
 - **Which atoms:** heteroatoms always; carbon only when it is charged or a radical; metals never. An atom whose count is odd or negative is left out rather than guessed.
@@ -238,6 +244,10 @@ Rebuild the library with `.venv/bin/python scripts/build_library.py` (network, J
 **Speed.** On Cloud Run's single CPU, a 3D model costs roughly 2.5× desktop time. Molecules over 50 heavy atoms with 5 or more rotatable bonds (chlorophyll, erythromycin) get one round of 2 candidate conformers and a shorter force-field clean-up (300 instead of 1000 iterations). Rigid ones (naphthalocyanine) keep the full clean-up, or they come out bowed; chlorophyll a went from 5.3 s to 1.7 s on a desktop. The extra "poor fit" round of 32 conformers is limited to molecules of up to 15 heavy atoms; cholesterol had been paying for it every time (5.1 s → 1.0 s). The CIP labeller only labels real stereocentres and stereo double bonds, with an iteration cap: unbounded, it never finished on dodecahedrane's 3D model, which timed out at 25 s.
 
 **Defaults.** Drawings start clean: no atom numbers (`numbering` defaults to `none`) and no stereo labels (the viewer's Stereo control starts at Off). Both can be switched on in the viewer.
+
+**Strain and spiro centres.** Candidates more than 8 kcal/mol above the best are dropped before matching the drawing; one spiropentane candidate had collapsed to 45° and fitted the bowtie drawing best. The filter is skipped for porphyrin-type macrocycles, where MMFF rates a bowed naphthalocyanine below the flat one. A spiro carbon joining two 3- or 4-membered rings is set geometrically to the real D₂d shape (perpendicular rings on a straight axis). MMFF twists spiropentadiene to 56° and even rates that lower in energy.
+
+**Crowded layouts.** When RDKit's layout has crossings or overlaps (BINAP: both PPh₂ groups drawn on top of the naphthalenes), CoordGen is tried at its best precision. Any connecting bond it stretched is pulled back to normal length (rotating or mirroring the smaller side) if that adds no overlaps. Tested on BINAP, Xantphos, rubrene, hexaphenylbenzene, triphenylphosphine and Pd(PPh₃)₄. BINAP's axial chirality cannot be drawn with wedges yet: SMILES cannot record it.
 
 **Slow CPUs.** If 8 conformers cannot be embedded in time, as for F430 on Cloud Run's single slower CPU, one conformer is embedded with a 10 s budget before giving up. Molecules over 50 heavy atoms start with 4 candidates instead of 8. Small molecules (up to 30 heavy atoms) whose best conformer still fits the flat drawing poorly try 32. With only 8 random conformers, 2-bromobutane had no anti chain, so its methyl swung about 2 bond lengths on lifting.
 
