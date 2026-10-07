@@ -83,7 +83,7 @@ The public server is
 https://moltalk-411294000488.us-central1.run.app/mcp
 ```
 
-It is free to use and needs no account or API key. Request logs record which tool was called, never the molecule.
+It is free to use and needs no account or API key. Request logs record which tool was called, never the molecule ([privacy policy](docs/PRIVACY.md), [terms](docs/TERMS.md), [support](docs/SUPPORT.md)).
 
 **ChatGPT.** With developer mode on, create an app (connector) for the URL above with **No authentication**, or
 upload the plugin package in [`plugin/`](plugin). Enable it in a chat and ask, for example, *"Using MolTalk, draw

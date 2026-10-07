@@ -1,8 +1,11 @@
 # Release notes
 
-## 1.0.0-rc.1 (October 2026)
+## 1.0.0 (October 2026)
 
-The first public release candidate.
+The first public release, submitted for ChatGPT plugin review. (Release candidate 1.0.0-rc.1 had the same features.)
+
+**Policies.** [Privacy policy](PRIVACY.md), [terms of service](TERMS.md) and [support](SUPPORT.md) pages; the plugin
+package carries these URLs, five positive and three negative review cases, the demo recording and these release notes.
 
 **Deployment.** Public MCP endpoint on Google Cloud Run
 (`https://moltalk-411294000488.us-central1.run.app/mcp`), stateless and scaling to zero. Production revision:
