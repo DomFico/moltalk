@@ -9,7 +9,7 @@
         "displayName": "MolTalk",
         "shortDescription": "Draw & verify molecules",
         "longDescription": "Ask about a molecule and MolTalk draws it inline: a clean 2D structure you can grab and rotate in 3D. Names are resolved from a curated library of 22,000 compounds, OPSIN and PubChem, never guessed, and stereochemistry is verified: R/S, E/Z, atropisomers, allenes, spiro compounds and helicenes. Lone pairs, charges and radicals are shown in 2D and 3D, common metal complexes are built in their proper geometry, and structures export to ChemDraw (CDXML), MOL, SDF, PDB, XYZ and SMILES, or as SVG/PNG images. Unknown or ambiguous names are reported, not invented.",
-        "category": "Education",
+        "category": "Education & Research",
         "developerName": "Dominic Fico",
         "websiteURL": "https://github.com/DomFico/moltalk",
         "brandColor": "#0B6BCB",
