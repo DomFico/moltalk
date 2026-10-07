@@ -992,7 +992,12 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
               "wedges_contradicted": int(contradicted), "note": note}
     from .coordination import is_metal as _metal
     metals = [a for a in drawn.GetAtoms() if _metal(a) and a.GetDegree() >= 2]
-    if metals:
+    if metals and complex_info is not None:
+        note += (f" The ligands are set in an idealised {complex_info['geometry'].replace('_', ' ')} arrangement around "
+                 f"{metals[0].GetSymbol()}, chosen by electron counting; metal–ligand distances are estimated from covalent "
+                 "radii, and which ligands are cis or trans is not given by the SMILES.")
+        result["note"] = note
+    elif metals:
         note += (f" The arrangement of ligands around {metals[0].GetSymbol()} comes from a generic force field, which does not "
                  "know ligand-field preferences (square planar vs tetrahedral), and cis/trans placement is not specified "
                  "by the SMILES; do not read coordination geometry from this model.")

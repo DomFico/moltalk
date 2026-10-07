@@ -61,3 +61,14 @@ def test_meso_and_enantiomers():
 def test_stereo_summary():
     assert analyze('F[C@H]1C[C@@H](C)CCC1')['stereo_summary']['status'] == 'fully specified'
     assert analyze('F[C@H]1CC(C)CCC1')['stereo_summary']['status'] == 'partially specified'
+
+
+def test_cdxml_has_no_empty_attributes():
+    # RDKit writes BondLength=""; an empty numeric attribute is invalid CDXML and strict readers may reject the file.
+    import re
+    from rdkit import Chem
+    from rdkit.Chem import rdChemDraw
+    from moltalk.export import export_structure
+    text = export_structure("Cn1c(=O)c2c(ncn2C)n(C)c1=O", "cdxml")["text"]
+    assert not re.search(r'=""', text)
+    assert Chem.MolToSmiles(rdChemDraw.MolsFromChemDrawBlock(text)[0]) == Chem.MolToSmiles(Chem.MolFromSmiles("Cn1c(=O)c2c(ncn2C)n(C)c1=O"))

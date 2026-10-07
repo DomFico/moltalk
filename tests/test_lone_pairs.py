@@ -89,7 +89,9 @@ def test_expanded_octets_get_their_vsepr_shape():
     assert round(_angle(bonds[0], bonds[1])) == 180 and len(dirs) == 3
 
 
-def test_metal_centre_geometry_is_flagged_not_trusted():
+def test_metal_centre_geometry_is_stated():
+    # Cisplatin written with dative bonds: Pt(II) d8 is built square planar, and the note says the geometry is
+    # idealised and that cis/trans placement is not given by the SMILES.
     model = conformer("N->[Pt](<-N)(Cl)Cl")
-    assert "generic force field" in model["note"] and "cis/trans" in model["note"]
+    assert "idealised square planar" in model["note"] and "cis or trans" in model["note"]
     assert model["lone_pair_dirs"].keys() == {"3", "4"}  # the two Cl; the ammine N donated their pairs to Pt

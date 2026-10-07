@@ -12,6 +12,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import Annotations, Icon, CallToolResult, EmbeddedResource, TextContent, TextResourceContents, ToolAnnotations
 from .chemistry import analyze, draw, conformer, substructure, enumerate_stereo
 from .export import export_structure as write_structure, MAX_EMBED_BYTES
+from . import __version__
 from .limits import runner
 from .naming import name_and_locants, pubchem_slot
 
@@ -56,6 +57,7 @@ ICONS = [Icon(src=_ICON_128, mimeType="image/png", sizes=["128x128"])]
 mcp = FastMCP("MolTalk", instructions=INSTRUCTIONS, icons=ICONS, website_url="https://github.com/DomFico/moltalk", host=HOST, port=PORT,
               stateless_http=True, json_response=True, transport_security=SECURITY,
               max_request_body_size=int(os.getenv("MOLTALK_MAX_BODY_BYTES", "65536")))
+mcp._mcp_server.version = __version__  # serverInfo.version: MolTalk's own release, not the MCP SDK's
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False, idempotentHint=True)
 def _ui_meta(invoking: str, invoked: str) -> dict[str, Any]:

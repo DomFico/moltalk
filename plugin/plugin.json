@@ -2,13 +2,13 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "moltalk",
   "version": "1.0.0",
-  "description": "Draw, rotate and name organic molecules with RDKit: verified names, IUPAC numbering, R/S and E/Z, lone pairs, a ChemDraw-style 3D view, and ChemDraw/MOL/SDF export.",
+  "description": "Chemistry tools for AI assistants: resolve, verify, draw, rotate and export molecular structures with RDKit. Verified names, R/S, E/Z and axial stereochemistry, lone pairs, metal complexes, 3D view, and ChemDraw/MOL/SDF export.",
   "extensions": {
     "com.openai": {
       "interface": {
         "displayName": "MolTalk",
-        "shortDescription": "Draw & rotate molecules",
-        "longDescription": "Ask about any molecule and MolTalk draws it inline: a clean 2D structure you can grab and rotate in 3D, with verified names (bundled library, OPSIN, PubChem), IUPAC numbering, R/S and E/Z labels, lone pairs, and export to SVG/PNG or ChemDraw, MOL, SDF, PDB and XYZ files. It never guesses a structure: unknown or ambiguous names are reported, not invented.",
+        "shortDescription": "Draw & verify molecules",
+        "longDescription": "Ask about a molecule and MolTalk draws it inline: a clean 2D structure you can grab and rotate in 3D. Names are resolved from a curated library of 22,000 compounds, OPSIN and PubChem, never guessed, and stereochemistry is verified: R/S, E/Z, atropisomers, allenes, spiro compounds and helicenes. Lone pairs, charges and radicals are shown in 2D and 3D, common metal complexes are built in their proper geometry, and structures export to ChemDraw (CDXML), MOL, SDF, PDB, XYZ and SMILES, or as SVG/PNG images. Unknown or ambiguous names are reported, not invented.",
         "category": "Education",
         "developerName": "Dominic Fico",
         "websiteURL": "https://github.com/DomFico/moltalk",

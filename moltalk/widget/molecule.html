@@ -726,6 +726,7 @@
       this.status = el("span", { class: "hint" }, TOUCH ? TOUCH_HINT : "Drag to rotate · Ctrl+scroll to zoom · Shift+drag to pan");
       stage.append(this.box, el("div", { class: "lifthint" }, this.status, tools));
       this.R = IDENTITY; this.s = 0; this.travel = 0; this.lifted = false; this.model = null;
+      window.moltalkViewer = this;  // the most recent viewer, for scripts/generate_readme_demos.py (no effect on use)
       this.zoom = 1; this.panX = 0; this.panY = 0;
       this.reset.addEventListener("click", () => this.resetAll());
       this.bindInput();

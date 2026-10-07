@@ -8,3 +8,6 @@ tools/
 
 # built plugin package (scripts or: cd plugin && zip -r ../dist/moltalk-plugin.zip .)
 dist/
+
+# README animations: only the GIFs are committed (scripts/generate_readme_demos.py also writes WebP)
+assets/demo/*.webp

@@ -96,7 +96,9 @@ def export_structure(smiles: str, fmt: str = "cdxml", coordinates: str | None = 
             notes.append("2D coordinates are a projection of the cage's 3D shape, as in the drawing (bonds cross).")
         mol.SetProp("_Name", title)
         if fmt == "cdxml":
-            text = rdChemDraw.MolToChemDrawBlock(mol)
+            # RDKit writes an empty BondLength="" on the root element; the attribute is optional and an empty number
+            # is invalid CDXML, so strict readers may reject the file. Drop any empty attribute.
+            text = re.sub(r'\s+[A-Za-z]+=""', "", rdChemDraw.MolToChemDrawBlock(mol))
         elif fmt == "mol":
             text = Chem.MolToMolBlock(mol)
         else:
