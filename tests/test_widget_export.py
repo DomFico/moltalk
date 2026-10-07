@@ -234,3 +234,45 @@ def test_lone_pairs_turn_with_the_molecule_and_charges_sit_outside():
                 await browser.close()
 
     asyncio.run(run())
+
+
+def test_flat_lone_pairs_sit_at_one_radius():
+    # TNT's O-: RDKit's raised minus widened the label box, so the pair toward it sat further out than the others.
+    async def run():
+        params = StdioServerParameters(command=sys.executable, args=["-m", "moltalk.server"])
+        async with stdio_client(params) as (read, write), ClientSession(read, write) as client:
+            await client.initialize()
+            html = (await client.read_resource(WIDGET_URI)).contents[0].text
+
+            async def py_call_tool(raw):
+                request = json.loads(raw)
+                return json.dumps(dump(await client.call_tool(request["name"], request["arguments"])))
+
+            async with playwright_api.async_playwright() as pw:
+                channel = os.getenv("MOLTALK_UI_BROWSER_CHANNEL", "chrome")
+                browser = await pw.chromium.launch(channel=None if channel == "chromium" else channel)
+                page = await browser.new_page(viewport={"width": 760, "height": 1000})
+                await page.expose_function("pyCallTool", py_call_tool)
+                await page.set_content(EXPORT_HOST)
+                frame = page.frame_locator("#w")
+                inner = page.frames[1]
+                for smiles in ("C[N+](=O)[O-]", "[OH-]", "O"):
+                    args = {"smiles": smiles, "label": "x"}
+                    result = dump(await client.call_tool("draw_molecule", args))
+                    await page.evaluate("([h, a, r]) => startWidget(h, a, r, 'light')", [html, args, result])
+                    await frame.locator(".liftable").wait_for()
+                    if not await frame.get_by_role("button", name="Hide lone pairs").count():
+                        await frame.get_by_role("button", name="Show lone pairs").click()
+                    # Pair centres (two dots each, in order) for the oxygen with three pairs, or the only lone-pair atom.
+                    atom = {"C[N+](=O)[O-]": 3, "[OH-]": 0, "O": 0}[smiles]
+                    pos = result["_meta"]["atom_px"][atom]
+                    radii = await inner.evaluate("""(n) => {
+                      const d = [...document.querySelectorAll('g.lone-pairs circle')].map(c => [+c.getAttribute('cx'), +c.getAttribute('cy')]);
+                      return d.slice(-2 * n); }""", 3 if smiles != "O" else 2)
+                    import math
+                    centres = [((radii[k][0] + radii[k + 1][0]) / 2, (radii[k][1] + radii[k + 1][1]) / 2) for k in range(0, len(radii), 2)]
+                    r = [math.dist(c, pos) for c in centres]
+                    assert max(r) - min(r) < 0.15 * max(r), (smiles, r)
+                await browser.close()
+
+    asyncio.run(run())

@@ -591,14 +591,25 @@
   }
   // box: the atom label's extent {x0, y0, x1, y1} and its glyph height h; dots sit just outside it.
   // Flat placement of an atom's electron domains: [{angle, dots: [[x, y], ...]}], pairs first, then a radical.
+  // A Lewis drawing convention, not a projection: every pair on the atom sits at the same radius from the element
+  // symbol (its circumradius, measured on the symbol alone: an H count or a raised charge sign beside it must not
+  // push one pair further out than the others, as it did for TNT's O-), and only the angles come from the bonds.
+  // One-letter symbols: a circle (the same radius for every pair). Wider symbols (Cl, Br): the same clearance all
+  // round an ellipse that follows the letters, or the pairs above and below would float away from them.
+  function lpRadius(box, angle = -Math.PI / 4) {
+    const h = box.h, extra = 0.06 * h + Math.max(1.6, 0.095 * h);
+    if ((box.symbolLength || 1) <= 1) return Math.hypot(0.36 * h, 0.5 * h) + extra;
+    const a = 0.36 * h * box.symbolLength + 0.12 * h, b = 0.62 * h;
+    return a * b / Math.hypot(b * Math.cos(angle), a * Math.sin(angle)) + extra;
+  }
   function electronDots(x, y, info, neighbourAngles, hLeft, box) {
     const occupied = neighbourAngles.slice();
     if (info.h) occupied.push(hLeft ? Math.PI : 0);  // the "H"/"H2" written beside the symbol
     const total = info.pairs + (info.radicals ? 1 : 0);
     const angles = freeAngles(total, occupied);
-    const h = box.h, gap = 0.32 * h, dot = Math.max(1.6, 0.095 * h), pad = 0.14 * h;
+    const h = box.h, gap = 0.32 * h;
     return angles.map((angle, k) => {
-      const r = toEdge(x, y, box, angle) + pad + dot;
+      const r = lpRadius(box, angle);
       const cx = x + r * Math.cos(angle), cy = y + r * Math.sin(angle);
       const px = -Math.sin(angle), py = Math.cos(angle);
       return { angle, dots: k < info.pairs ? [[cx + px * gap / 2, cy + py * gap / 2], [cx - px * gap / 2, cy - py * gap / 2]] : [[cx, cy]] };
@@ -924,8 +935,15 @@
           // Which side RDKit wrote the H on: the label box reaches further that way (H3O+ vs OH-).
           const box = this.flatLabelBox(i, x, y);
           const hLeft = x - box.x0 > box.x1 - x;
-          const domains = drawElectrons(g, x, y, info, angles, hLeft, box, ELEMENT_COLORS[this.elementOf(i)] || INK);
-          if (info.charge) this.chargeOutside(g, i, x, y, info.charge, angles.concat(domains.map((d) => d.angle)), box);
+          box.symbolLength = (this.elementOf(i) || "X").length;
+          // Centre the pairs on the element symbol's own glyphs (RDKit anchors a two-letter symbol on its first
+          // letter, so "Cl" extends to the right of the atom position).
+          const [cx, cy] = this.symbolCentre(i, x, y, box);
+          const domains = drawElectrons(g, cx, cy, info, angles, hLeft, box, ELEMENT_COLORS[this.elementOf(i)] || INK);
+          if (info.charge) {
+            const blockers = angles.concat(info.h ? [hLeft ? Math.PI : 0] : []);
+            this.chargeOutside(g, i, cx, cy, info.charge, blockers, domains.map((d) => d.angle), box);
+          }
         }
         this.flatSvg.append(g);
       }
@@ -1060,7 +1078,7 @@
     // With lone pairs shown, a charge is written outside the dots, like an exponent: RDKit's own superscript sign
     // (the small glyph raised above the atom's centre) is hidden and the charge is drawn in the largest open gap
     // around the atom, nearest the upper right, beyond the dots.
-    chargeOutside(g, i, x, y, charge, taken, box) {
+    chargeOutside(g, i, x, y, charge, blockers, pairAngles, box) {
       const glyphs = [...this.flatSvg.querySelectorAll(`path[class="atom-${i}"]`)].map((n) => ({ n, b: n.getBBox() }));
       const tallest = Math.max(0, ...glyphs.map(({ b }) => b.height));
       for (const { n, b } of glyphs) {
@@ -1069,20 +1087,34 @@
           n.setAttribute("data-charge-glyph", "1");
         }
       }
-      const full = 2 * Math.PI, wanted = -Math.PI / 4;
-      const sorted = taken.map((a) => ((a % full) + full) % full).sort((p, q) => p - q);
-      let best = wanted, bestScore = -Infinity;
-      sorted.forEach((a, k) => {
-        const next = k + 1 < sorted.length ? sorted[k + 1] : sorted[0] + full, size = next - a, mid = a + size / 2;
-        const score = size - 0.5 * Math.abs(Math.atan2(Math.sin(mid - wanted), Math.cos(mid - wanted)));
-        if (score > bestScore) { bestScore = score; best = mid; }
-      });
-      const h = box.h, r = toEdge(x, y, box, best) + 0.14 * h + 2 * Math.max(1.6, 0.095 * h) + 0.45 * h;
+      // Conventional superscript first: upper right, then nearby angles. Only bonds and the H text block a spot; a
+      // lone pair there just pushes the charge outward, past the pairs, rather than onto the far side of the atom.
+      const near = (a, b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
+      const deg = Math.PI / 180;
+      const candidates = [-45, -30, -60, -15, -75, 0, -90, -120, 30, -150, 180].map((d) => d * deg);
+      const best = candidates.find((t) => !blockers.some((b) => near(t, b) < 0.5)) ?? -Math.PI / 4;
+      const h = box.h, lp = lpRadius(box, best);
+      const pairThere = pairAngles.some((a) => near(a, best) < 0.6);
+      const r = (pairThere ? lp + 0.32 * h : lp - 0.1 * h) + 0.45 * h;
       const t = svgEl("text", { x: (x + r * Math.cos(best)).toFixed(1), y: (y + r * Math.sin(best)).toFixed(1),
         "text-anchor": "middle", "dominant-baseline": "central", "font-size": (0.75 * h).toFixed(1),
         "font-family": "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", fill: ELEMENT_COLORS[this.elementOf(i)] || INK });
       t.textContent = (Math.abs(charge) > 1 ? Math.abs(charge) : "") + (charge > 0 ? "+" : "−");
       g.append(t);
+    }
+
+    // Centre of the element symbol's glyphs: the main row (not a raised charge or a subscript), and only glyphs
+    // within the symbol's own width of the atom position (not an H written beside it).
+    symbolCentre(i, x, y, box) {
+      const glyphs = [...this.flatSvg.querySelectorAll(`path[class="atom-${i}"]`)].map((n) => n.getBBox()).filter((b) => b.width || b.height);
+      if (!glyphs.length) return [x, y];
+      const tallest = Math.max(...glyphs.map((b) => b.height));
+      const reach = 0.65 * box.h * (box.symbolLength || 1);
+      const main = glyphs.filter((b) => b.height >= 0.6 * tallest && Math.abs(b.y + b.height / 2 - y) < 0.35 * tallest
+                                        && Math.abs(b.x + b.width / 2 - x) <= reach);
+      if (!main.length) return [x, y];
+      const x0 = Math.min(...main.map((b) => b.x)), x1 = Math.max(...main.map((b) => b.x + b.width));
+      return [(x0 + x1) / 2, y];
     }
 
     flatLabelBox(i, x, y) {
@@ -1422,6 +1454,7 @@
             const hw = lab && lab.h ? 0.62 * fs * (lab.h > 1 ? 1.6 : 1) : 0;
             const box = { x0: p.x - w / 2 - (lab && lab.hLeft ? hw : 0), x1: p.x + w / 2 + (lab && !lab.hLeft ? hw : 0),
                           y0: p.y - 0.5 * fs, y1: p.y + 0.5 * fs, h: fs };
+            box.symbolLength = lab ? lab.symbol.length : 1;
             const flat = electronDots(p.x, p.y, electronInfo, angles, lab ? lab.hLeft : false, box);
             // Rotated: each pair is a fixed object in 3D, like a hydrogen. It sits along its VSEPR direction, its two
             // dots split along a fixed 3D axis; seen end-on it sits over the atom, as a hydrogen pointing at you would.
