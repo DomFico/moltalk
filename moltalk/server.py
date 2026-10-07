@@ -1,6 +1,7 @@
 from importlib.resources import files
 from typing import Any
 import argparse
+import re
 import time
 import json
 import hashlib
@@ -14,7 +15,7 @@ from .export import export_structure as write_structure, MAX_EMBED_BYTES
 from .limits import runner
 from .naming import name_and_locants, pubchem_slot
 
-WIDGET_URI = "ui://widget/molecule-v27.html"
+WIDGET_URI = "ui://widget/molecule-v28.html"
 WIDGET_MIME = "text/html;profile=mcp-app"
 WIDGET_HTML = files("moltalk").joinpath("widget/molecule.html").read_text(encoding="utf-8")
 
@@ -237,8 +238,67 @@ async def enumerate_stereoisomers(smiles: str, limit: int = 16) -> CallToolResul
     return CallToolResult(content=[TextContent(type="text", text=text)],
                           structuredContent={"kind": "stereoisomers", **result}, _meta={"svgs": svgs})
 
+# Stereodescriptors written in a name: (R), (2S,3R), (E), (Z), axial (Ra)/(Sa)/(aR)/(aS)/(P)/(M), and bare R-/S- prefixes.
+_DESCRIPTOR_GROUP = re.compile(r"\(([^()]*)\)")
+_DESCRIPTOR = re.compile(r"^(?:\d+[a-z]?|[a-z]?)(R|S|E|Z|Ra|Sa|aR|aS|P|M)\*?$")
+
+
+def _name_descriptors(name: str) -> dict[str, int]:
+    """Count the stereodescriptors a name states, by kind: R, S, E, Z and axial."""
+    counts = {"R": 0, "S": 0, "E": 0, "Z": 0, "axial": 0}
+    groups = [g for g in _DESCRIPTOR_GROUP.findall(name)]
+    bare = re.match(r"^\s*([RS])-", name)
+    if bare:
+        groups.append(bare.group(1))
+    for group in groups:
+        parts = [p.strip() for p in group.split(",")]
+        found = [_DESCRIPTOR.match(p) for p in parts]
+        if not parts or not all(found):
+            continue  # not a stereodescriptor group: (+), (-), (2-methylpropyl), (III)...
+        for match in found:
+            d = match.group(1)
+            counts["axial" if d in ("Ra", "Sa", "aR", "aS", "P", "M") else d] += 1
+    return counts
+
+
+def _verify_name_stereo(name: str, result: dict) -> None:
+    """A name that states stereochemistry must resolve to a structure that encodes it. PubChem, for one, files
+    '(R)-BINAP' under a record with no axial stereo at all; such a structure is rejected rather than drawn as if it
+    were the stereoisomer asked for. Counts must be covered (each R, S, E, Z the name states must be present among
+    the structure's own CIP labels); axial chirality cannot be encoded in a SMILES at all, so it is never verified."""
+    wanted = _name_descriptors(name)
+    if not any(wanted.values()):
+        return
+    analysis = result.get("analysis") or {}
+    have = {"R": 0, "S": 0, "E": 0, "Z": 0}
+    for c in analysis.get("stereocenters", []):
+        if c.get("cip") in have:
+            have[c["cip"]] += 1
+    for b in analysis.get("double_bond_stereo", []):
+        if b.get("configuration") in have:
+            have[b["configuration"]] += 1
+    stated = ", ".join(f"{n} {k}" for k, n in wanted.items() if n)
+    if wanted["axial"] or any(wanted[k] > have[k] for k in have):
+        if wanted["axial"] or (wanted["R"] + wanted["S"] and not have["R"] + have["S"] and not analysis.get("stereocenters")):
+            why = ("The descriptor most likely refers to axial chirality (an atropisomer such as BINAP), which a SMILES "
+                   "or database record does not encode")
+        else:
+            why = f"The structure found encodes {', '.join(f'{n} {k}' for k, n in have.items() if n) or 'no specified stereochemistry'}"
+        raise ValueError(f"'{name}' states stereochemistry ({stated}) that the structure found does not have. {why}, so the "
+                         f"requested stereoisomer could not be verified and nothing was assumed. "
+                         f"(Found: {result.get('title') or result.get('canonical_smiles')}, {result.get('source')}.) "
+                         "Draw the unspecified compound by its plain name if that is acceptable, or supply a structure.")
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True))
 async def resolve_name(name: str, allow_network: bool = False) -> dict[str, Any]:
+    """Resolve a compound name to a structure. Tried in order: (1) MolTalk's bundled library of thousands of common compounds (trivial names, synonyms, IUPAC names; offline); (2) OPSIN, which reads systematic IUPAC names offline, including stereodescriptors; (3) PubChem, only when allow_network=true (best effort; the name is sent to PubChem). A name shared by different structures is reported as ambiguous, not guessed. A name that states stereochemistry (R/S, E/Z, axial) must resolve to a structure that encodes it, or it is rejected as unverified. Check the returned identity and stereo_summary before relying on it."""
+    result = await _resolve_unverified(name, allow_network)
+    _verify_name_stereo(name, result)
+    return result
+
+
+async def _resolve_unverified(name: str, allow_network: bool = False) -> dict[str, Any]:
     """Resolve a compound name to a structure. Tried in order: (1) MolTalk's bundled library of thousands of common compounds (trivial names, synonyms, IUPAC names; offline); (2) OPSIN, which reads systematic IUPAC names offline, including stereodescriptors; (3) PubChem, only when allow_network=true (best effort; the name is sent to PubChem). A name shared by different structures is reported as ambiguous, not guessed. Check the returned identity and stereo_summary before relying on it."""
     from . import library
     from .naming import opsin_smiles

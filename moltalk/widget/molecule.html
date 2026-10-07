@@ -1414,21 +1414,8 @@
           const open = turn(geo.open[i]);
           const electronInfo = showLonePairs && this.data.lone_pairs && this.data.lone_pairs[String(i)];
           const hasPairs = electronInfo && (electronInfo.pairs || electronInfo.radicals);
-          // Charge: flat, written as a superscript after the symbol; rotated, in the atom's most open direction (and
-          // beyond its lone pairs, like an exponent), turning with the molecule.
           const chargeValue = lab && lab.charge ? lab.charge : (atom.charge || 0);
-          if (chargeValue && (lab || hasPairs)) {
-            const c = (Math.abs(chargeValue) > 1 ? Math.abs(chargeValue) : "") + (chargeValue > 0 ? "+" : "−");
-            const w = lab ? 0.62 * fs * lab.symbol.length : 0;
-            const flatX = w / 2 + (lab && lab.h && !lab.hLeft ? 0.62 * fs * 1.4 : 0) + 0.3 * fs, flatY = -0.35 * fs;
-            const dist = edge(open[0], open[1]) + (hasPairs ? 0.65 * fs : 0.35 * fs);
-            const [ax, ay] = atLeast(open[0] * dist, open[1] * dist, edge(0.7071, -0.7071) + 0.3 * fs, 0.7071, -0.7071);
-            const t = svgEl("text", { x: (p.x + flatX + (ax - flatX) * s).toFixed(1), y: (p.y + flatY + (ay - flatY) * s).toFixed(1),
-              "text-anchor": "middle", "dominant-baseline": "central", "font-size": (0.7 * fs).toFixed(1),
-              "font-family": "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", fill: ELEMENT_COLORS[atom.element] || INK });
-            t.textContent = c;
-            g.append(t);
-          }
+          let lpDots = [];
           if (hasPairs) {
             const angles = this.neighbours[i].map((j) => Math.atan2(pts[j].y - p.y, pts[j].x - p.x));
             const w = lab ? 0.62 * fs * lab.symbol.length : 0.6 * fs;
@@ -1471,6 +1458,28 @@
               });
             }
             drawDots(g, domains, fs, ELEMENT_COLORS[atom.element] || INK);
+            lpDots = domains.flatMap((d) => d.dots);
+          }
+          // Formal charge: typography, not geometry. It is a superscript on the atom, placed on screen just outside
+          // the atom's footprint (its label and its lone-pair dots), preferring the upper right and avoiding bonds,
+          // and it keeps its last spot while that stays free, so it does not orbit the atom as the molecule turns.
+          if (chargeValue && (lab || hasPairs)) {
+            const c = (Math.abs(chargeValue) > 1 ? Math.abs(chargeValue) : "") + (chargeValue > 0 ? "+" : "−");
+            const footprint = [[lbox.x0, lbox.y0], [lbox.x1, lbox.y0], [lbox.x0, lbox.y1], [lbox.x1, lbox.y1]].concat(lpDots);
+            const bondAngles = this.neighbours[i].map((j) => Math.atan2(pts[j].y - p.y, pts[j].x - p.x));
+            const blocked = (t) => bondAngles.some((b) => Math.abs(Math.atan2(Math.sin(t - b), Math.cos(t - b))) < 0.45);
+            const candidates = [-Math.PI / 4, -Math.PI / 2, 0, -3 * Math.PI / 4, Math.PI / 4, Math.PI, 3 * Math.PI / 4, Math.PI / 2];
+            if (!this.chargeAngle) this.chargeAngle = {};
+            const kept = this.chargeAngle[i];
+            const angle = kept != null && !blocked(kept) ? kept : (candidates.find((t) => !blocked(t)) ?? -Math.PI / 4);
+            this.chargeAngle[i] = angle;
+            const ux = Math.cos(angle), uy = Math.sin(angle);
+            const reach = Math.max(...footprint.map(([x, y]) => (x - p.x) * ux + (y - p.y) * uy)) + 0.4 * fs;
+            const t = svgEl("text", { x: (p.x + ux * reach).toFixed(1), y: (p.y + uy * reach).toFixed(1),
+              "text-anchor": "middle", "dominant-baseline": "central", "font-size": (0.7 * fs).toFixed(1),
+              "font-family": "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", fill: ELEMENT_COLORS[atom.element] || INK });
+            t.textContent = c;
+            g.append(t);
           }
           const tags = [];
           if (this.numbering === "iupac" && this.locants[String(i)]) tags.push(this.locants[String(i)]);

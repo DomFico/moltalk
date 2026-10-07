@@ -110,3 +110,29 @@ def test_draw_label_is_checked_against_the_library(monkeypatch):
     assert wrong["status"] == "mismatch" and wrong["library_cid"] == 2519
     assert _draw("C[C@@H](C(=O)O)N", "D-alanine")["status"] == "stereo differs"  # this SMILES is L-alanine
     assert _draw("CC(C)(F)C1CC(Br)C(O)C1C#N", "my compound")["status"] == "unverified"
+
+
+@pytest.mark.parametrize("name", ["(S)-BINAP", "(Ra)-BINAP", "(P)-BINAP"])
+def test_stereo_the_structure_cannot_carry_is_rejected(name):
+    # PubChem/Wikidata file "(S)-BINAP" under a record with no axial stereo; it must not be drawn as if it were (S).
+    from moltalk.server import _verify_name_stereo
+    result = {"title": "BINAP", "source": "test", "analysis": {"stereocenters": [], "double_bond_stereo": []}}
+    with pytest.raises(ValueError, match="could not be verified"):
+        _verify_name_stereo(name, result)
+
+
+@pytest.mark.parametrize("name, ok", [("(R)-carvone", True), ("(S)-carvone", True), ("(E)-2-butene", True),
+                                      ("(R)-2-butanol", True), ("L-alanine", True), ("ibuprofen", True)])
+def test_stated_stereo_must_match_the_structure(name, ok):
+    result = asyncio.run(resolve_name(name))
+    assert bool(result) is ok
+
+
+def test_wrong_descriptor_is_rejected():
+    from moltalk.server import _verify_name_stereo
+    s_carvone = {"title": "(+)-carvone", "source": "test",
+                 "analysis": {"stereocenters": [{"atom_index": 3, "cip": "S"}], "double_bond_stereo": []}}
+    with pytest.raises(ValueError, match="could not be verified"):
+        _verify_name_stereo("(R)-carvone", s_carvone)
+    _verify_name_stereo("(S)-carvone", s_carvone)  # matches: no error
+    _verify_name_stereo("(+)-carvone", s_carvone)  # optical rotation sign is not a CIP descriptor: not checked

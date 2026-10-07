@@ -23,7 +23,7 @@ moltalk  (.venv/bin/moltalk → RDKit worker processes with time/memory limits)
 | Install in an isolated venv (`.venv`, Python 3.12, RDKit 2026.03.6, mcp 1.30.0) | **Verified** |
 | Test suite: 106 tests (104 offline by default; 2 live PubChem tests need `MOLTALK_NETWORK_TESTS=1`), including live PubChem and real-browser tests of the drawing, its 3D rotation, zoom, hydrogens and a phone touch screen | **Verified** (`pytest`) |
 | Tools and widget through official MCP clients (Python SDK over stdio/HTTP, MCP Inspector CLI) | **Verified** |
-| UI resource metadata (`ui://widget/molecule-v27.html`, `text/html;profile=mcp-app`, `_meta.ui.resourceUri` + `openai/outputTemplate`) | **Verified** |
+| UI resource metadata (`ui://widget/molecule-v28.html`, `text/html;profile=mcp-app`, `_meta.ui.resourceUri` + `openai/outputTemplate`) | **Verified** |
 | Widget rendering in a sandboxed iframe through the MCP Apps bridge, plus a follow-up `tools/call` from the widget | **Verified** in Chrome with a host harness that imitates ChatGPT (`tests/test_widget_ui.py`, `tests/test_widget_3d.py`) |
 | tunnel-client → stdio server path | **Verified** with tunnel-client's local control plane (`scripts/local-tunnel-test.sh`) |
 | Name resolution: bundled library (22,038 compounds), OPSIN for systematic names, live PubChem fallback | **Verified** (`tests/test_library.py`; PubChem with `MOLTALK_NETWORK_TESTS=1`) |
@@ -121,7 +121,7 @@ The widget's **Hide/Show atom indices** button redraws the structure through a f
 | Start automatically at login (optional) | `systemctl --user enable moltalk-tunnel` |
 | Remove the service | `scripts/uninstall-service.sh`. To also remove the key and profile: `rm -r ~/.config/moltalk` |
 
-After changing tool metadata or the widget: restart (`scripts/start.sh`), then in ChatGPT open the plugin under **Plugins** → **Refresh**, and start a new chat. If you change the widget substantially, bump the version in its URI (`molecule-v27` → `v28`), because ChatGPT caches templates.
+After changing tool metadata or the widget: restart (`scripts/start.sh`), then in ChatGPT open the plugin under **Plugins** → **Refresh**, and start a new chat. If you change the widget substantially, bump the version in its URI (`molecule-v28` → `v29`), because ChatGPT caches templates.
 
 ### If the Tunnel option is unavailable
 
@@ -140,7 +140,7 @@ A public HTTPS endpoint is the documented alternative. ChatGPT accepts only **OA
 | `conformer_3d(smiles)` | viewer-only | one calculated 3D conformer aligned to the flat drawing, for rotating it (hidden from the model) |
 | `resolve_name(name, allow_network)` | no | structure from the bundled library, OPSIN or (opt-in) PubChem, with source, CID, title, IUPAC name, `stereo_summary` and warnings; ambiguous or unknown names are errors |
 
-**UI component.** `moltalk/widget/molecule.html` is registered as `ui://widget/molecule-v27.html` (`text/html;profile=mcp-app`) with an empty CSP allowlist, so it makes no network requests. It uses the MCP Apps bridge (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`, `ui/notifications/size-changed`) and falls back to `window.openai`. The SVG is sent only in the result's `_meta`, which ChatGPT passes to the widget but not to the model; the chemistry data stays in `structuredContent` for the model. The SVG is sanitized before insertion. Pass `include_svg=true` for clients without UI support.
+**UI component.** `moltalk/widget/molecule.html` is registered as `ui://widget/molecule-v28.html` (`text/html;profile=mcp-app`) with an empty CSP allowlist, so it makes no network requests. It uses the MCP Apps bridge (`ui/initialize`, `ui/notifications/tool-result`, `tools/call`, `ui/notifications/size-changed`) and falls back to `window.openai`. The SVG is sent only in the result's `_meta`, which ChatGPT passes to the widget but not to the model; the chemistry data stays in `structuredContent` for the model. The SVG is sanitized before insertion. Pass `include_svg=true` for clients without UI support.
 
 **Rotate the drawing in 3D.** Grab the flat drawing and drag (one finger on a phone). Over the first ~90 px it lifts off the page into 3D and keeps rotating as a chemical drawing:
 - **Drawing style:** flat colour, implicit carbons, element labels with their hydrogens (OH/HO, NH₂) in RDKit's colours, half-coloured bonds, ring double bonds on the inner side, and gaps where a bond passes in front of another.
@@ -175,6 +175,10 @@ Tested offline on 25 typical course molecules (chains, rings, aromatics, steroid
 
 **Label check.** When the model draws a structure with `label=` set to a compound name, `draw_molecule` looks the label up in the library. It reports `label_check`: `matches`, `stereo differs`, `mismatch` (the drawing is a different compound; also shown in the widget and put first in the model's text) or `unverified` (the label is not a library name). So a SMILES the model writes from memory under a known name is caught. The server instructions also tell the model not to write SMILES from memory when `resolve_name` refuses a name, unless the user asks it to, and then to say it is unverified.
 
+**Stereochemistry stated in a name is verified.** If a name states R/S, E/Z or axial descriptors, such as (Ra), (Sa), (P) or (M), the structure it resolves to must encode at least as many of each, with matching CIP labels; otherwise the name is rejected as unverified, and nothing is drawn. This applies to the library, OPSIN and PubChem alike. "(S)-BINAP" is rejected, because the records it maps to carry no axial stereo; "(R)-carvone" passes only if the structure's centre really is R. Optical rotation, (+) or (−), is not a CIP descriptor and is not checked.
+
+**Atropisomers (not yet supported).** A plain SMILES cannot record axial chirality, so BINAP-type stereochemistry is never assumed; it is rejected as above. RDKit can represent it: with its newer stereo perception and an extended SMILES that carries a wedge on a bond next to the axis, it marks the biaryl bond atropisomeric and labels it P or M (tested on BINAP). Supporting that input means switching all stereo handling to the newer perception and making the 3D model respect the axis, which is the next step.
+
 OPSIN replaces PubChem only for *name → structure* of systematic names. It cannot *generate* a name for a structure, so structure → IUPAC name still comes from the library or PubChem. A novel structure found in neither is shown with atom indices and no name, rather than a guessed one.
 
 Rebuild the library with `.venv/bin/python scripts/build_library.py` (network, Java and OPSIN; about 10 minutes). RDKit must recompute PubChem's InChIKey from its SMILES, or the entry is dropped; compounds above 150 heavy atoms are also dropped. The current build kept 22,038 entries. Any seed name PubChem cannot find stops the build.
@@ -196,7 +200,8 @@ Rebuild the library with `.venv/bin/python scripts/build_library.py` (network, J
 
 **Labels and lone pairs in the rotated view.** Lone pairs, charges, R/S and E/Z labels, atom numbers and double bonds are fixed in 3D and turn with the molecule, as hydrogens do, instead of keeping a fixed place on screen.
 - **Lone pairs:** each pair lies along its VSEPR direction, out past the edge of its label, with its two dots split along a fixed 3D axis. A pair pointing at the viewer sits over its atom, as a hydrogen would.
-- **Charges, R/S and numbers:** they sit in the atom's most open direction (away from its bonds and lone pairs; for a stereocentre, usually where its hidden hydrogen points), with charges beyond any lone pairs. A minimum offset keeps them off the label when that direction points at the viewer.
+- **Formal charges are typography, not geometry:** after projection, a charge is placed as an upright superscript just outside the atom's on-screen footprint (its label and lone-pair dots). It prefers the upper right, avoids bonds, and keeps its spot while that stays free, so it never orbits the atom. Charges never move between resonance-equivalent atoms: the Lewis structure as given is drawn.
+- **R/S, E/Z and numbers:** they sit in the atom's most open 3D direction (for a stereocentre, usually where its hidden hydrogen points). A minimum offset keeps them off the label when that direction points at the viewer.
 - **Double bonds:** the second line lies in the plane of the double bond (toward its ring or substituents). Seen edge-on, the two lines close up to 35% of the gap, but never merge. E/Z labels sit on the bond's open side.
 - **Flat drawing:** with lone pairs shown, a charge is written outside the dots, like an exponent. RDKit's raised sign is hidden, and the charge is drawn in the largest free gap nearest the upper right.
 
