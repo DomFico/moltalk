@@ -5,6 +5,7 @@ embed fullerene-like cages, so those start from a spectral (graph Laplacian) sph
 The conformer is rotated (never reflected) to best match the flat drawing, so a drag
 can start from the drawing itself and lift it into 3D.
 """
+import json
 import time
 import numpy as np
 from rdkit import Chem
@@ -13,7 +14,7 @@ from rdkit.Geometry import Point3D
 from .depiction import _cage, layout
 from .stereo import stereogenic_unspecified, organic_stereo, assign_cip
 from .coordination import is_metal
-from . import atropisomer, stereounits
+from . import atropisomer, complexes, stereounits
 from .depiction import _chelated_metal
 
 EMBED_TIMEOUT_S = 5
@@ -151,15 +152,66 @@ def _allene_twists(mol) -> list[tuple[int, int, int, int]]:
     return found
 
 
+def _vsepr_angles(mol) -> tuple[list[tuple[int, int, int, float]], list[str]]:
+    """Bond angles to hold at centres a force field cannot describe: MMFF94 has no parameters for radicals,
+    carbenes or localised carbanions, and RDKit's hybridisation labels for them are unreliable (it calls the methyl
+    radical and both carbenes sp3), so the shape comes from electron counting (VSEPR):
+      * localised carbanion, three bonds and a lone pair: pyramidal, 109.5 degrees (MMFF built CH3- and the ammonium
+        and sulfonium ylide carbons flat). Not when conjugated (benzyl, enolate, cyclopentadienyl: planar is right),
+        and not next to P+ or As+: phosphonium ylide carbons are near planar.
+      * sigma radical, two bonds and one unpaired electron (vinyl, phenyl): bent at 135 degrees (MMFF: linear).
+      * carbene, two bonds and two nonbonding electrons: SMILES does not say singlet or triplet. With a heteroatom
+        or halogen neighbour the singlet is the ground state (about 105 degrees: CCl2, NHCs); otherwise the triplet
+        (about 136 degrees: CH2). MMFF built both linear.
+    Angles inside rings of up to 6 atoms are left to the ring. Three-bond radicals (methyl, tBu) are left alone: MMFF
+    builds them planar to slightly pyramidal, as they are. Returns (angles, notes for the method string)."""
+    angles, notes = [], set()
+    ring_info = mol.GetRingInfo()
+
+    def in_small_ring(i, j, k):
+        return any(len(r) <= 6 and {i, j, k} <= set(r) for r in ring_info.AtomRings())
+
+    for atom in mol.GetAtoms():
+        c = atom.GetIdx()
+        neighbours = [n.GetIdx() for n in atom.GetNeighbors()]
+        radicals, charge, z = atom.GetNumRadicalElectrons(), atom.GetFormalCharge(), atom.GetAtomicNum()
+        target = None
+        if z == 6 and charge == -1 and not radicals and len(neighbours) == 3 and not atom.GetIsAromatic():
+            conjugated = any(b.GetBondType() != Chem.BondType.SINGLE or b.GetIsConjugated()
+                             or any(nb.GetBondType() in (Chem.BondType.DOUBLE, Chem.BondType.TRIPLE, Chem.BondType.AROMATIC)
+                                    for nb in b.GetOtherAtom(atom).GetBonds())
+                             for b in atom.GetBonds())
+            ylide_p = any(n.GetSymbol() in ("P", "As") and n.GetFormalCharge() > 0 for n in atom.GetNeighbors())
+            if not conjugated and not ylide_p:
+                target, note = 109.5, "carbanion pyramidal"
+        elif z == 6 and not charge and len(neighbours) == 2 and radicals == 1:
+            target, note = 135.0, "sigma radical bent"
+        elif z == 6 and not charge and len(neighbours) == 2 and radicals == 2:
+            hetero = any(n.GetAtomicNum() not in (1, 6) for n in atom.GetNeighbors())
+            target, note = (105.0, "carbene drawn as singlet (heteroatom neighbour)") if hetero else \
+                (136.0, "carbene drawn as triplet (no heteroatom neighbour)")
+        if target is None:
+            continue
+        for x in range(len(neighbours)):
+            for y in range(x + 1, len(neighbours)):
+                i, k = neighbours[x], neighbours[y]
+                if not in_small_ring(i, c, k):
+                    angles.append((i, c, k, target))
+                    notes.add(note)
+    return angles, sorted(notes)
+
+
 def _optimize(mol, method):
     """Force-field clean-up of every conformer on mol. Large molecules get a shorter clean-up: ETKDG geometry is
     already reasonable, and the viewer needs a picture, not an energy minimum (chlorophyll: 1.7 s of MMFF)."""
     iterations = 300 if _large_and_flexible(mol) else 1000
     twists = _allene_twists(mol)
-    if twists and AllChem.MMFFHasAllMoleculeParams(mol):
+    angles, notes = _vsepr_angles(mol)
+    if (twists or angles) and AllChem.MMFFHasAllMoleculeParams(mol):
         # MMFF94 and UFF both flatten an allene (their torsion terms across the sp carbon are zero, so 1,4 contacts
         # win): ETKDG's 84 degrees became 180 for 1,3-dichloroallene, which also destroys its chirality. Hold each
-        # allene's ends perpendicular, keeping the sense ETKDG chose.
+        # allene's ends perpendicular, keeping the sense ETKDG chose. MMFF has no parameters for radicals, carbenes
+        # or localised carbanions either (see _vsepr_angles): hold those centres at their VSEPR angles.
         props = AllChem.MMFFGetMoleculeProperties(mol)
         results = []
         for conf in mol.GetConformers():
@@ -168,10 +220,13 @@ def _optimize(mol, method):
                 current = rdMolTransforms.GetDihedralDeg(conf, *quad)
                 target = 90.0 if current >= 0 else -90.0
                 ff.MMFFAddTorsionConstraint(*quad, False, target, target, 100.0)
+            for i, j, k, target in angles:
+                ff.MMFFAddAngleConstraint(i, j, k, False, target - 2.0, target + 2.0, 100.0)
             ff.Minimize(maxIts=iterations)
             results.append((0, ff.CalcEnergy()))
         _store_energies(mol, results)
-        return method + " + MMFF94 (allene ends held perpendicular)"
+        held = (["allene ends held perpendicular"] if twists else []) + notes
+        return method + f" + MMFF94 ({'; '.join(held)})"
     if AllChem.MMFFHasAllMoleculeParams(mol):
         results = AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=iterations)
         _store_energies(mol, results)
@@ -204,7 +259,7 @@ def _free_base(drawn_heavy, site):
     return out
 
 
-def _embed(heavy, conformers=8):
+def _embed(heavy, conformers=8, enforce_chirality=True):
     """Return (molecule with explicit Hs and its conformers, method). Heavy-atom indices are unchanged; hydrogen
     order may differ from Chem.AddHs(heavy), so map hydrogens through _drawn_positions."""
     cage = _cage(heavy)
@@ -226,6 +281,7 @@ def _embed(heavy, conformers=8):
         from .stereounits import helices
         params = AllChem.ETDG() if helices(heavy) else AllChem.ETKDGv3()
         params.randomSeed = 0xC0FFEE
+        params.enforceChirality = enforce_chirality
         params.timeout = EMBED_TIMEOUT_S
         status = -1
         # Several conformers, so the one that best matches the flat drawing can be chosen; then random starting
@@ -406,8 +462,12 @@ def _fit(xyz, xy, weights, scale=None):
         d = np.sign(np.linalg.det(vt.T @ u.T)) or 1.0
         rot = vt.T @ np.diag([1, 1, d]) @ u.T
         aligned = p @ rot.T
+        spread = float(np.sum(w * aligned[:, :2] ** 2))
+        # One heavy atom (water, methane, a methyl radical) gives the fit nothing to size by: it returned scale 0 and
+        # collapsed every shown hydrogen onto the atom. Keep the 3D model's own size then (RDKit's 2D bond length
+        # of 1.5 matches a C–C bond in angstroms).
         scale = fixed if fixed is not None else \
-            float(np.sum(w * aligned[:, :2] * q[:, :2]) / max(np.sum(w * aligned[:, :2] ** 2), 1e-9))
+            (float(np.sum(w * aligned[:, :2] * q[:, :2]) / spread) if spread > 1e-6 else 1.0)
         aligned *= scale
         residual = np.linalg.norm(aligned[:, :2] - q[:, :2], axis=1)
         c = max(0.5, 2.0 * float(np.median(residual)))
@@ -430,13 +490,18 @@ def _drawn_positions(embedded, conf_id, drawn, site):
     used = {}
     for atom in drawn.GetAtoms():
         i = atom.GetIdx()
-        if atom.GetAtomicNum() == 1 and i >= embedded.GetNumHeavyAtoms():
+        if atom.GetAtomicNum() == 1 and atom.GetDegree() == 1 and i >= embedded.GetNumHeavyAtoms():
             parent = atom.GetNeighbors()[0].GetIdx()
             rank = used.get(parent, 0)
             used[parent] = rank + 1
             out[i] = pos[hydrogens[parent][rank]]
+        elif atom.HasProp("_eta_atoms"):
+            continue  # a pi ligand's ring or alkene centre: placed below, once its atoms are
         else:
             out[i] = pos[i]
+    for atom in drawn.GetAtoms():
+        if atom.HasProp("_eta_atoms"):
+            out[atom.GetIdx()] = out[json.loads(atom.GetProp("_eta_atoms"))].mean(axis=0)
     if site:
         metal, donors = site
         out[metal] = out[donors].mean(axis=0)
@@ -546,6 +611,17 @@ def lone_pair_directions(atom, centre, neighbours, domains):
     out = []
     if not b:  # a free ion (Cl-): tetrahedral
         out = [np.array(v) / np.sqrt(3) for v in ([1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1])]
+    elif len(b) == 3 and domains == 1 and hyb in (Chem.HybridizationType.SP3, Chem.HybridizationType.SP2):
+        # Three bonds and one lone pair (amine, carbanion, ylide carbon, pyrrole N): read the shape actually built,
+        # not RDKit's hybridisation label. Pyramidal: opposite the bonds. Flat: in the p orbital, along the normal.
+        # (Opposite the bonds of a flat atom is a near-zero vector: the Wittig ylide's CH2- pair pointed 14 degrees
+        # from a C-H bond.)
+        away = -sum(b)
+        normal = _unit(np.cross(b[1] - b[0], b[2] - b[0]))
+        if np.linalg.norm(away) > 0.3 or normal is None:
+            out = [_unit(away)]
+        else:
+            out = [normal if np.dot(normal, away) >= 0 else -normal]
     elif hyb == Chem.HybridizationType.SP3 and len(b) + domains == 4:
         if len(b) == 3:
             out = [_unit(-sum(b))]
@@ -577,9 +653,31 @@ def lone_pair_directions(atom, centre, neighbours, domains):
         e1 = _perpendicular(b[0])
         out = [-b[0], e1, -e1][:domains]
     out = [d for d in out if d is not None]
-    if len(out) < domains:  # anything else (hypervalent XeF4, ClF3...): spread by repulsion
+    if len(out) < domains or not _clear_of_bonds(out[:domains], b):
+        # Anything else (hypervalent XeF4, ClF3...), or a template that does not fit the geometry actually built:
+        # spread the domains by repulsion from the real bonds, so a lone pair never sits on a bond.
         out = _repel(b, domains)
     return out[:domains]
+
+
+LONE_PAIR_MIN_ANGLE = 80.0  # degrees from any bond (a p-orbital pair is at 90; VSEPR pairs at 105 or more)
+
+
+def _clear_of_bonds(dirs, bonds) -> bool:
+    limit = np.cos(np.radians(LONE_PAIR_MIN_ANGLE))
+    if any(np.dot(d, v) > limit for d in dirs for v in bonds):
+        return False
+    return all(np.dot(dirs[i], dirs[j]) < np.cos(np.radians(60)) for i in range(len(dirs)) for j in range(i + 1, len(dirs)))
+
+
+def _same_centres(mol, conf, wanted: dict) -> bool:
+    """Do the stereocentres of this model have the input's R/S labels? (Only those atoms: a metal with four
+    neighbours would otherwise count as a new stereocentre.)"""
+    probe = Chem.Mol(mol, confId=conf.GetId())
+    Chem.AssignStereochemistryFrom3D(probe)
+    assign_cip(probe, atoms=sorted(wanted), bonds=[])
+    return all(probe.GetAtomWithIdx(i).HasProp("_CIPCode") and probe.GetAtomWithIdx(i).GetProp("_CIPCode") == cip
+               for i, cip in wanted.items())
 
 
 def _same_stereo(mol, conf, reference: str) -> bool:
@@ -604,15 +702,18 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     heavy atoms only, so showing or hiding hydrogens never changes the view."""
     heavy_count = mol_in.GetNumAtoms()
     shown = drawn.GetNumAtoms()
+    # The drawing without hydrogens: the input's atoms plus, for a pi complex, its ring/alkene centres.
+    core_count = drawn_heavy.GetNumAtoms()
     flat_heavy = Chem.Mol(drawn_heavy)
     layout(flat_heavy)  # the same deterministic layout draw_molecule uses
-    xy_heavy = flat_heavy.GetConformer().GetPositions()[:, :2]
-    if shown > heavy_count:
+    xy_core = flat_heavy.GetConformer().GetPositions()[:, :2]
+    xy_heavy = xy_core[:heavy_count]
+    if shown > core_count:
         flat = Chem.Mol(drawn)
         layout(flat)
         xy = flat.GetConformer().GetPositions()[:, :2]
     else:
-        xy = xy_heavy
+        xy = xy_core
     site = _chelated_metal(drawn_heavy)
     source = _free_base(drawn_heavy, site) if site else mol_in
 
@@ -665,6 +766,19 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     wanted_units = [(u, stated_units[u["key"]]) for u in stereounits.units(mol_in) if u["key"] in stated_units] \
         if not site else []
     mirror_ok = not stereounits._other_chirality(mol_in)
+    # A complex assembled from loose pieces (Wilkinson's catalyst): the pieces are embedded as stored, then set
+    # around the metal in its ideal geometry (complexes.arrange).
+    complex_info = complexes.info(drawn_heavy) if not site else None
+    chelate_reference = None
+    if complex_info is not None and complex_info.get("chelates"):
+        bonded = complexes.embedding_source(drawn_heavy, heavy_count)
+        if bonded is not None:
+            # ETKDG could not embed Jacobsen's Mn–salen with its chirality enforced (the metal closes rings through the
+            # stereocentres' neighbours); without enforcement it embeds in a fraction of a second, and conformers
+            # whose stereocentres do not match the input are dropped below.
+            source = bonded
+            chelate_reference = {a.GetIdx(): a.GetProp("_CIPCode") for a in mol_in.GetAtoms()
+                                 if a.HasProp("_CIPCode") and not is_metal(a)}
     # An Xaabb spiro system (read with the newer perception): ETKDG does not enforce its tags, so check each model's
     # stereo against the input's; if every chiral tag belongs to the spiro system, the mirror image fixes a wrong one.
     spiro_units = stereounits.xaabb(mol_in) if not site else []
@@ -679,13 +793,17 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
         if best is not None and time.monotonic() - started > RETRY_BUDGET_S:
             break  # a big, slow molecule (erythromycin): more conformers would mostly time out
         try:
-            candidate_mol, candidate_method = _embed(source, count)
+            candidate_mol, candidate_method = _embed(source, count, enforce_chirality=chelate_reference is None)
         except ValueError:
             if best is not None:  # the larger retry failed (e.g. a big macrolide timing out): keep the first result
                 break
             raise
         if site:
             candidate_method += ", ring embedded as the free base"
+        if complex_info is not None:
+            for conf in candidate_mol.GetConformers():
+                complexes.arrange(candidate_mol, conf.GetId(), complex_info)
+            candidate_method += f", ligands set {complex_info['geometry'].replace('_', ' ')} around the metal"
         energies = [c.GetDoubleProp("energy") for c in candidate_mol.GetConformers() if c.HasProp("energy")]
         # Not for porphyrin-type macrocycles: MMFF rates a bowed naphthalocyanine 37 kcal/mol *below* the flat one, and
         # the flattest-ring preference already picks the right shape there.
@@ -693,6 +811,8 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
         for conf in candidate_mol.GetConformers():
             if lowest is not None and conf.HasProp("energy") and conf.GetDoubleProp("energy") > lowest + ENERGY_WINDOW:
                 continue  # strained (spiropentane: one candidate half-collapsed to 45° fitted the bowtie drawing best)
+            if chelate_reference and not _same_centres(candidate_mol, conf, chelate_reference):
+                continue
             if spiro_reference is not None and not _same_stereo(candidate_mol, conf, spiro_reference):
                 if not spiro_mirror_ok:
                     continue
@@ -720,12 +840,14 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     # Long open chains (chlorophyll's phytyl, fatty acids) come out of ETKDG crumpled, often folded back over the
     # rest of the molecule. Straighten them to the extended zigzag, the textbook and low-energy shape that the flat
     # drawing also shows, and keep it only if it matches the drawing better.
-    straightened = _optional(_extend_chains, mol, best[1])
+    # Not for an assembled complex: these steps turn pieces about single bonds, and its loose ligands look like tails.
+    straightened = None if complex_info is not None else _optional(_extend_chains, mol, best[1])
     if straightened is not None:
         candidate = evaluate(straightened, best[1])
         if candidate[0][0] <= best[0][0] and candidate[0][2] < best[0][2]:
             best, mol = candidate, straightened
-    unfolded = _optional(_swing_tail, mol, best[1], lambda m: evaluate(m, best[1]), heavy_count)
+    unfolded = None if complex_info is not None else \
+        _optional(_swing_tail, mol, best[1], lambda m: evaluate(m, best[1]), heavy_count)
     if unfolded is not None:
         candidate = evaluate(unfolded, best[1])
         if candidate[0][0] <= best[0][0] and candidate[0][2] < best[0][2]:
@@ -747,7 +869,7 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     (contradicted, _, rmsd), conf_id, xyz, raw, heavy_rot, heavy_scale, vsepr_lone = best
     frame_rot = heavy_rot
     to_heavy_frame = np.eye(3)
-    if shown > heavy_count:
+    if shown > core_count:
         # The explicit-H drawing is laid out in its own orientation (often turned over relative to the heavy-atom
         # drawing), so align the same conformer to it: the lift then starts from exactly the drawing on screen.
         # to_heavy_frame lets the viewer keep the same view when hydrogens are toggled.
@@ -837,7 +959,7 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
             continue
         atom = drawn.GetAtomWithIdx(i)
         vectors = [_unit(raw[n.GetIdx()] - raw[i]) for n in atom.GetNeighbors()]
-        if shown <= heavy_count:  # hidden hydrogens: their 3D positions come from the embedded molecule
+        if shown <= core_count:  # hidden hydrogens: their 3D positions come from the embedded molecule
             hs = [h.GetIdx() for h in mol.GetAtomWithIdx(i).GetNeighbors() if h.GetAtomicNum() == 1][:atom.GetTotalNumHs()]
             vectors += [_unit(embedded[h] - raw[i]) for h in hs]
         if len(vectors) == 1 and atom.GetHybridization() == Chem.HybridizationType.SP2:
@@ -853,8 +975,10 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     for i in range(shown):
         atom = drawn.GetAtomWithIdx(i)
         entry = {"index": i, "element": atom.GetSymbol(), "charge": atom.GetFormalCharge(),
-                 "h": 0 if i >= heavy_count or shown > heavy_count else atom.GetTotalNumHs(),
+                 "h": 0 if i >= heavy_count or shown > core_count else atom.GetTotalNumHs(),
                  "xy": [round(float(c), 4) for c in xy[i]], "xyz": [round(float(c), 4) for c in xyz[i]]}
+        if atom.HasProp("_eta_atoms"):
+            entry["centroid"] = True  # a pi ligand's ring or alkene centre: no label, only its bond to the metal
         if i < heavy_count and i in stereocentres and mol.GetAtomWithIdx(i).HasProp("_CIPCode") and not is_metal(atom):
             entry["cip"] = mol.GetAtomWithIdx(i).GetProp("_CIPCode")
             if i in unspecified:
@@ -863,7 +987,7 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     note = ("Rotation uses one calculated conformer (" + method + "), not a measured or unique structure; "
             "flexible parts can adopt other shapes.")
     result = {"atoms": atoms, "bonds": bonds, "rings": rings, "method": method, "heavy_atom_count": heavy_count,
-              "hydrogens_shown": shown > heavy_count, "fit_rmsd": round(rmsd, 3), "lone_pair_dirs": lone_pairs,
+              "hydrogens_shown": shown > core_count, "fit_rmsd": round(rmsd, 3), "lone_pair_dirs": lone_pairs,
               "to_heavy_frame": [[round(float(v), 6) for v in row] for row in to_heavy_frame],
               "wedges_contradicted": int(contradicted), "note": note}
     from .coordination import is_metal as _metal

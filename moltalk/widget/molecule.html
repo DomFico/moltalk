@@ -931,6 +931,11 @@
     // Lone pairs on the flat drawing: an overlay in the RDKit SVG's own coordinates (so zoom and pan apply).
     updateLonePairs() {
       this.flatSvg.querySelectorAll("[data-charge-glyph]").forEach((n) => { n.style.display = ""; });
+      // RDKit draws an unpaired electron as a small dot inside the atom's label group. With lone pairs shown the
+      // overlay draws every electron itself, so RDKit's dot is hidden (it was drawn twice: "·CH3·"); with lone pairs
+      // off it is the only mark of the radical and stays.
+      this.markRadicalDots();
+      this.flatSvg.querySelectorAll("[data-radical-glyph]").forEach((n) => { n.style.display = showLonePairs ? "none" : ""; });
       const old = this.flatSvg.querySelector("g.lone-pairs");
       if (old) old.remove();
       if (showLonePairs && this.data.lone_pairs) {
@@ -1124,7 +1129,7 @@
     // Centre of the element symbol's glyphs: the main row (not a raised charge or a subscript), and only glyphs
     // within the symbol's own width of the atom position (not an H written beside it).
     symbolCentre(i, x, y, box) {
-      const glyphs = [...this.flatSvg.querySelectorAll(`path[class="atom-${i}"]`)].map((n) => n.getBBox()).filter((b) => b.width || b.height);
+      const glyphs = [...this.flatSvg.querySelectorAll(`path[class="atom-${i}"]:not([data-radical-glyph])`)].map((n) => n.getBBox()).filter((b) => b.width || b.height);
       if (!glyphs.length) return [x, y];
       const tallest = Math.max(...glyphs.map((b) => b.height));
       const reach = 0.65 * box.h * (box.symbolLength || 1);
@@ -1135,10 +1140,28 @@
       return [(x0 + x1) / 2, y];
     }
 
+    // Tag RDKit's radical dots: tiny, roughly round paths among an atom's label glyphs (letters are taller, a minus
+    // sign is wide and flat). Only on atoms the analysis says carry unpaired electrons.
+    markRadicalDots() {
+      if (this.radicalDotsMarked) return;
+      this.radicalDotsMarked = true;
+      for (const [key, info] of Object.entries(this.data.lone_pairs || {})) {
+        if (!info.radicals) continue;
+        const paths = [...this.flatSvg.querySelectorAll(`path[class="atom-${key}"]`)].map((n) => ({ n, b: n.getBBox() }));
+        const tallest = Math.max(0, ...paths.map(({ b }) => b.height));
+        for (const { n, b } of paths) {
+          const size = Math.max(b.width, b.height);
+          if (size > 0 && size < 0.3 * tallest && b.width < 2 * b.height && b.height < 2 * b.width) n.setAttribute("data-radical-glyph", "1");
+        }
+      }
+    }
+
     flatLabelBox(i, x, y) {
-      // RDKit draws each atom label as paths with class "atom-<i>"; their union is the label's exact box.
+      // RDKit draws each atom label as paths with class "atom-<i>"; their union is the label's exact box (without a
+      // radical dot, which sits beside the label).
+      this.markRadicalDots();
       let box = null;
-      for (const path of this.flatSvg.querySelectorAll(`path[class="atom-${i}"]`)) {
+      for (const path of this.flatSvg.querySelectorAll(`path[class="atom-${i}"]:not([data-radical-glyph])`)) {
         const b = path.getBBox();
         if (!b.width && !b.height) continue;
         box = box ? { x0: Math.min(box.x0, b.x), y0: Math.min(box.y0, b.y), x1: Math.max(box.x1, b.x + b.width), y1: Math.max(box.y1, b.y + b.height) }
@@ -1250,6 +1273,7 @@
     label(atom, pts, i) {
       // ChemDraw/RDKit convention: carbons are implicit unless charged or isolated.
       const neighbours = this.neighbours[i];
+      if (atom.centroid) return null;  // a pi ligand's ring/alkene centre: only its bond to the metal is drawn
       if (atom.element === "C" && !atom.charge && neighbours.length) return null;
       let mean = 0;
       for (const j of neighbours) mean += pts[j].x - pts[i].x;
@@ -1534,7 +1558,7 @@
           }
           const tags = [];
           if (this.numbering === "iupac" && this.locants[String(i)]) tags.push(this.locants[String(i)]);
-          if (this.numbering === "indices" && atom.index != null) tags.push(String(i));
+          if (this.numbering === "indices" && atom.index != null && !atom.centroid) tags.push(String(i));
           // Specified: only configurations the input fixes. All: also the one this conformer happens to have at an
           // unspecified centre, marked "arb." (not R*/S*, which in IUPAC usage means relative configuration).
           const showCip = atom.cip && (atom.arbitrary ? stereoLabels === "all" : stereoLabels !== "off");

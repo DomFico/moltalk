@@ -8,7 +8,7 @@ from .depiction import layout
 from .conformer import conformer_3d
 from .stereo import stereogenic_unspecified, organic_stereo, assign_cip
 from .coordination import coordinate, normalize_coordination, is_metal
-from . import atropisomer, stereounits
+from . import atropisomer, complexes, stereounits
 
 GROUPS = {"alcohol": "[OX2H][CX4]", "phenol": "[OX2H]c", "carboxylic acid": "[CX3](=O)[OX2H]",
           "ester": "[CX3](=O)[OX2][#6]", "amide": "[CX3](=O)[NX3]", "ketone": "[#6][CX3](=O)[#6]",
@@ -216,6 +216,7 @@ def _svg(mol, width: int, height: int, atom_indices: bool, locants: dict | None 
     # Allenes, spiro atoms and helicenes: their own wedges and labels, checked against the configuration.
     mol, unit_wedges, unit_problems = stereounits.depict(mol, source, stereounits.stated(source))
     helix = any(u["type"] == "helix" for u in stereounits.units(source))
+    _label_charged_carbons(mol)
     for i in open_atoms:
         if i < original_atoms and not mol.GetAtomWithIdx(i).HasProp("_CIPCode"):
             mol.GetAtomWithIdx(i).SetProp("_CIPCode", "?")
@@ -301,6 +302,23 @@ def _svg(mol, width: int, height: int, atom_indices: bool, locants: dict | None 
         depiction["warning"] = " ".join([depiction.get("warning", ""), *unit_problems]).strip()
     return drawer.GetDrawingText(), bonds, depiction, atom_px
 
+def _label_charged_carbons(mol):
+    """RDKit writes a charged carbon as 'C-' and drops its hydrogens (the Wittig ylide's CH2- came out as 'C-'), while
+    every other charged atom keeps them ('NH3+', 'OH-'). Give such carbons their full label, with the hydrogens and
+    the charge, facing either way."""
+    for atom in mol.GetAtoms():
+        if atom.GetAtomicNum() != 6 or not atom.GetFormalCharge() or atom.HasProp("_displayLabel"):
+            continue
+        hs = atom.GetTotalNumHs()
+        if not hs:
+            continue
+        charge = atom.GetFormalCharge()
+        sign = (str(abs(charge)) if abs(charge) > 1 else "") + ("+" if charge > 0 else "-")
+        count = f"<sub>{hs}</sub>" if hs > 1 else ""
+        atom.SetProp("_displayLabel", f"CH{count}<sup>{sign}</sup>")
+        atom.SetProp("_displayLabelW", f"H{count}C<sup>{sign}</sup>")
+
+
 def _depiction_note(depiction: dict) -> dict:
     if depiction.get("helicene"):
         return depiction  # the helicene note is set by _svg
@@ -355,8 +373,12 @@ def depiction_mol(smiles: str, hydrogens: bool = False):
     coordinated, note = coordinate(mol)
     if coordinated is None:
         coordinated, note = normalize_coordination(mol)
+    if coordinated is None:
+        coordinated, note = complexes.assemble(mol)  # a complex stored as metal + loose ligands (Wilkinson's)
     if coordinated is not None:
         mol = coordinated
+    elif complexes.annotate_connected(mol):  # stored already bonded (Grubbs): geometry for the 3D model only
+        pass
     if hydrogens:
         mol = Chem.AddHs(mol)
     return mol, note

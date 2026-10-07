@@ -3,6 +3,7 @@
 RDKit's fused-ring depiction fails on polyhedral cages (fullerenes, cubane, adamantane): bonds stretch across
 the drawing and cross. Such molecules are drawn as a view of their 3D shape, as textbooks do.
 """
+import json
 import re
 from functools import lru_cache
 
@@ -37,7 +38,10 @@ def _crossings(pos, bonds) -> int:
 
 def quality(mol) -> dict:
     pos = mol.GetConformer().GetPositions()[:, :2]
-    bonds = [(b.GetBeginAtomIdx(), b.GetEndAtomIdx()) for b in mol.GetBonds()]
+    # A bond to a pi ligand's ring centre ends inside the ring by design (ferrocene): not a crossing or a bond length.
+    centres = {a.GetIdx() for a in mol.GetAtoms() if a.HasProp("_eta_atoms")}
+    bonds = [(b.GetBeginAtomIdx(), b.GetEndAtomIdx()) for b in mol.GetBonds()
+             if b.GetBeginAtomIdx() not in centres and b.GetEndAtomIdx() not in centres]
     if not bonds:
         return {"bond_crossings": 0, "stretched_bonds": 0, "overlapping_atoms": 0, "max_bond_length_ratio": 1.0}
     lengths = np.linalg.norm(pos[[a for a, _ in bonds]] - pos[[b for _, b in bonds]], axis=1)
@@ -201,7 +205,7 @@ def _movable_sides(mol):
     return sides
 
 
-def repair_layout(mol, budget_s: float = REPAIR_BUDGET_S) -> float:
+def repair_layout(mol, budget_s: float = REPAIR_BUDGET_S, only=None, turns=None) -> float:
     """Greedy search, in place: for each acyclic bond, give it its target length and try the smaller side turned
     about the anchor atom and mirrored across the bond; take the move that lowers the energy most, and repeat.
     A rigid move changes only the terms between the moved side and the rest (and the angles at the bond's two
@@ -214,6 +218,8 @@ def repair_layout(mol, budget_s: float = REPAIR_BUDGET_S) -> float:
     bonds = ctx["bonds"]
     prepared = []
     for bond_index, a, b, side in _movable_sides(mol):
+        if only is not None and bond_index not in only:
+            continue
         inside_mask = np.zeros(n, dtype=bool)
         inside_mask[side] = True
         outside = np.flatnonzero(~inside_mask)
@@ -249,7 +255,7 @@ def repair_layout(mol, budget_s: float = REPAIR_BUDGET_S) -> float:
                 rel = pos[side] - anchor - u * (bond_len - target * ctx["L"])
                 shapes += [rel, np.outer(rel @ u, u) - np.outer(rel @ normal, normal)]
             for shape in shapes:
-                for turn in _TURNS:
+                for turn in (_TURNS if turns is None else turns):
                     c, s_ = np.cos(turn), np.sin(turn)
                     trial = pos.copy()
                     trial[side] = anchor + shape @ np.array([[c, s_], [-s_, c]])
@@ -451,15 +457,22 @@ def _best_candidate(mol, current_q) -> dict:
     input's stereochemistry replaces the current layout (in place). Returns its quality."""
     candidates = [Chem.Mol(mol)]
     sampled = Chem.Mol(mol)
-    with rdBase.BlockLogs():
-        rdDepictor.Compute2DCoords(sampled, nFlipsPerSample=2, nSample=100, sampleSeed=7, permuteDeg4Nodes=True)
-    candidates.append(sampled)
+    try:
+        with rdBase.BlockLogs():
+            rdDepictor.Compute2DCoords(sampled, nFlipsPerSample=2, nSample=100, sampleSeed=7, permuteDeg4Nodes=True)
+        candidates.append(sampled)
+    except Exception:  # noqa: BLE001 - RDKit's sampler fails on some metal complexes (map::at); skip that candidate
+        pass
     coordgen = Chem.Mol(mol)
     if _coordgen(coordgen):
         candidates.append(coordgen)
-    hub = _hub_layout(mol)
-    if hub is not None:
-        candidates.append(hub)
+    pushed = []
+    for push in (0.0, 0.6, 1.2):  # the hub layout with the ligands at normal and at longer distances from the hub
+        hub = _hub_layout(mol, push)
+        if hub is not None:
+            pushed.append((_score(quality(hub)), push, hub))
+    if pushed:
+        candidates.append(min(pushed, key=lambda item: (item[0], item[1]))[2])
     # Each candidate as made (CoordGen with its stretched bridges pulled in, as before) and repaired: repair lowers the
     # energy, which can trade a crossing for shorter bonds; the acceptance rule below decides.
     if len(candidates) > 2:
@@ -492,12 +505,16 @@ def _best_candidate(mol, current_q) -> dict:
     return q
 
 
-def _hub_layout(mol):
+def _hub_layout(mol, push: float = 0.0):
     """A candidate for star-shaped molecules (Pd(PPh3)4, Wilkinson's catalyst, tetraphenylmethane): each branch around
     the most central branching atom is laid out on its own, then the branches are set evenly around that atom, each
     pointing outward. None when the molecule has no such hub."""
     hub, best = None, 0
-    for atom in mol.GetAtoms():
+    from .coordination import is_metal
+    metals = [a for a in mol.GetAtoms() if is_metal(a) and a.GetDegree() >= 2]
+    if len(metals) == 1:  # a metal complex: the metal is the hub, even inside its chelate rings
+        hub, best = metals[0].GetIdx(), 2
+    for atom in ([] if hub is not None else mol.GetAtoms()):
         if atom.GetDegree() < 3 or atom.IsInRing():
             continue
         cut = Chem.RWMol(mol)
@@ -512,13 +529,19 @@ def _hub_layout(mol):
     cut.RemoveAtom(hub)
     branches = [[i if i < hub else i + 1 for i in frag] for frag in Chem.GetMolFrags(cut)]
     pos = np.zeros((mol.GetNumAtoms(), 2))
+    # Every bond to the hub gets one of len(neighbours) evenly spaced slots; a chelate (bipyridine, salen) takes as
+    # many neighbouring slots as it has donors and points along their middle, so three bipyridines sit 120 degrees
+    # apart and a salen's four donors face the remaining chloride.
     order = []
     for branch in branches:
         anchors = [n for n in neighbours if n in branch]
-        order += [(neighbours.index(a), a, branch) for a in anchors[:1]]
+        if anchors:
+            order.append((min(neighbours.index(a) for a in anchors), anchors, branch))
     order.sort()
-    for k, (_, anchor, branch) in enumerate(order):
-        # The branch with the hub atom attached, so its own layout leaves room for the bond to the hub.
+    slot = 0
+    total = len(neighbours)
+    for _, anchors, branch in order:
+        # The branch with the hub atom attached, so its own layout leaves room for the bond(s) to the hub.
         keep = set(branch) | {hub}
         piece = Chem.RWMol(mol)
         for i in sorted(set(range(mol.GetNumAtoms())) - keep, reverse=True):
@@ -533,14 +556,36 @@ def _hub_layout(mol):
         except Exception:  # noqa: BLE001
             return None
         local = dict(zip(members, piece.GetConformer().GetPositions()[:, :2]))
-        angle = 2 * np.pi * k / len(order) + np.pi / 2
+        middle = slot + (len(anchors) - 1) / 2
+        slot += len(anchors)
+        angle = 2 * np.pi * middle / total + np.pi / 2
         direction = np.array([np.cos(angle), np.sin(angle)])
-        bond = local[anchor] - local[hub]
-        scale = 1.5 / (np.linalg.norm(bond) or 1.0)
+        bond = np.mean([local[a] for a in anchors], axis=0) - local[hub]
+        if np.linalg.norm(bond) < 1e-6:
+            bond = np.mean([local[i] for i in branch], axis=0) - local[hub]
+        lengths = [np.linalg.norm(local[a] - local[hub]) for a in anchors]
+        scale = 1.5 / (float(np.mean(lengths)) or 1.0)
         turn = np.arctan2(direction[1], direction[0]) - np.arctan2(bond[1], bond[0])
         c, s_ = np.cos(turn), np.sin(turn)
         for i in branch:
-            pos[i] = ((local[i] - local[hub]) * scale) @ np.array([[c, s_], [-s_, c]])
+            # push > 0 moves the whole ligand outward, lengthening only its bond(s) to the hub: three bipyridines
+            # around Ru do not fit at normal Ru–N length (their outer rings collide), as textbook drawings show.
+            pos[i] = ((local[i] - local[hub]) * scale) @ np.array([[c, s_], [-s_, c]]) + push * 1.5 * direction
+    # Pieces not bonded to the hub (counter-ions, water): their own layout, set beside the complex.
+    placed = {hub} | {i for _, _, branch in order for i in branch}
+    rest = [i for i in range(mol.GetNumAtoms()) if i not in placed]
+    if rest:
+        others = Chem.RWMol(mol)
+        for i in sorted(placed, reverse=True):
+            others.RemoveAtom(i)
+        others = others.GetMol()
+        others.UpdatePropertyCache(strict=False)
+        with rdBase.BlockLogs():
+            rdDepictor.Compute2DCoords(others)
+        opos = others.GetConformer().GetPositions()[:, :2]
+        shift = np.array([pos[sorted(placed)][:, 0].max() + 2.0 - opos[:, 0].min(), -opos[:, 1].mean()])
+        for k, i in enumerate(rest):
+            pos[i] = opos[k] + shift
     conf = Chem.Conformer(mol.GetNumAtoms())
     for i, (x, y) in enumerate(pos):
         conf.SetAtomPosition(i, Point3D(float(x), float(y), 0.0))
@@ -548,6 +593,31 @@ def _hub_layout(mol):
     out.RemoveAllConformers()
     out.AddConformer(conf, assignId=True)
     return out
+
+
+def _place_small_ligands(mol, q) -> dict:
+    """Metal complexes: put each small terminal ligand (Cl, CO, CN, NH3, H2O: at most 4 atoms) in the most open
+    direction around the metal, trying every 15 degrees and normal to long bond lengths, without moving anything
+    else (Jacobsen's catalyst: the chloride was drawn under the Mn label; moving the salen to make room distorted
+    it). Kept only if no worse."""
+    from .coordination import is_metal
+    metals = [a.GetIdx() for a in mol.GetAtoms() if is_metal(a) and a.GetDegree() >= 2]
+    if not metals:
+        return q
+    small = set()
+    for bond_index, a, b, side in _movable_sides(mol):
+        if (a in metals or b in metals) and len(side) <= 4 and not set(side) & set(metals):
+            small.add(bond_index)
+    if not small:
+        return q
+    trial = Chem.Mol(mol)
+    repair_layout(trial, 0.5, only=small, turns=np.radians(np.arange(-180, 180, 15)))
+    tq = quality(trial)
+    if _score(tq) <= _score(q):
+        mol.RemoveAllConformers()
+        mol.AddConformer(Chem.Conformer(trial.GetConformer()), assignId=True)
+        return tq
+    return q
 
 
 def stereo_faithful(mol) -> bool:
@@ -761,11 +831,120 @@ def _pin_porphyrinoid(ligand, force=False) -> bool:
     return True
 
 
+def _layout_with_centres(mol) -> dict | None:
+    """Complexes with pi ligands (ferrocene, zirconocene dichloride, Zeise's salt, COD complexes): each ring or alkene
+    centre is a dummy atom bonded to the metal, and the ligand itself is not bonded to anything. The rest of the
+    complex is laid out with the centres as plain terminal atoms (so ferrocene's two centres sit opposite each other,
+    Cp2ZrCl2's four positions form a cross); then each pi ligand is laid out on its own and set on its centre(s):
+    one centre, the ring around it, the ligand's bulk turned away from the metal (an alkene drawn side-on); several
+    centres (COD), the ligand fitted onto them. The metal–centre bond is twice a normal bond, so the line from the
+    metal ends at the middle of the ring, the textbook picture."""
+    centres = {a.GetIdx(): json.loads(a.GetProp("_eta_atoms")) for a in mol.GetAtoms() if a.HasProp("_eta_atoms")}
+    if not centres:
+        return None
+    eta_atoms = {i for atoms in centres.values() for i in atoms}
+    frags = [set(f) for f in Chem.GetMolFrags(mol)]
+    pieces = [f for f in frags if f & eta_atoms]
+    core_atoms = sorted(set(range(mol.GetNumAtoms())) - set().union(*pieces))
+    core = Chem.RWMol(mol)
+    for i in sorted(set().union(*pieces), reverse=True):
+        core.RemoveAtom(i)
+    core = core.GetMol()
+    # The centres of one chelating pi ligand (COD's two alkenes) must be neighbours around the metal (cis), not
+    # opposite: tie them together for the core layout (the core is only used for coordinates).
+    index = {a: k for k, a in enumerate(core_atoms)}
+    tied = Chem.RWMol(core)
+    for piece in pieces:
+        mine = [c for c, eta in centres.items() if set(eta) <= piece]
+        for a, b in zip(mine, mine[1:]):
+            tied.AddBond(index[a], index[b], Chem.BondType.SINGLE)
+    core = tied.GetMol()
+    for a in core.GetAtoms():
+        a.ClearProp("_eta_atoms")
+    core.UpdatePropertyCache(strict=False)
+    Chem.GetSymmSSSR(core)
+    result = layout(core)
+    cpos = core.GetConformer().GetPositions()[:, :2]
+    pos = np.zeros((mol.GetNumAtoms(), 2))
+    for k, i in enumerate(core_atoms):
+        pos[i] = cpos[k]
+    bonds = [np.linalg.norm(cpos[b.GetBeginAtomIdx()] - cpos[b.GetEndAtomIdx()]) for b in core.GetBonds()]
+    length = float(np.median(bonds)) if bonds else 1.5
+    for c in centres:
+        metal = next(n.GetIdx() for n in mol.GetAtomWithIdx(c).GetNeighbors())
+        u = pos[c] - pos[metal]
+        u = u / (np.linalg.norm(u) or 1.0)
+        pos[c] = pos[metal] + 2.0 * length * u
+    for piece in pieces:
+        atoms = sorted(piece)
+        sub = Chem.RWMol(mol)
+        for i in sorted(set(range(mol.GetNumAtoms())) - piece, reverse=True):
+            sub.RemoveAtom(i)
+        sub = sub.GetMol()
+        sub.UpdatePropertyCache(strict=False)
+        Chem.GetSymmSSSR(sub)
+        with rdBase.BlockLogs():
+            rdDepictor.Compute2DCoords(sub)
+        local = sub.GetConformer().GetPositions()[:, :2]
+        sub_len = np.median([np.linalg.norm(local[b.GetBeginAtomIdx()] - local[b.GetEndAtomIdx()]) for b in sub.GetBonds()])
+        local = local * (length / (sub_len or 1.0))
+        where = {a: local[k] for k, a in enumerate(atoms)}
+        mine = [c for c, eta in centres.items() if set(eta) <= piece]
+        mids = np.array([np.mean([where[i] for i in centres[c]], axis=0) for c in mine])
+        targets = np.array([pos[c] for c in mine])
+        metal = next(n.GetIdx() for n in mol.GetAtomWithIdx(mine[0]).GetNeighbors())
+        if len(mine) == 1:
+            # Turn the ligand so its bulk points away from the metal; an alkene (two atoms) lies across the bond.
+            eta = centres[mine[0]]
+            away = targets[0] - pos[metal]
+            if len(eta) == 2:
+                axis = where[eta[1]] - where[eta[0]]
+                want = np.array([-away[1], away[0]])
+                turn = np.arctan2(want[1], want[0]) - np.arctan2(axis[1], axis[0])
+            else:
+                bulk = local.mean(axis=0) - mids[0]
+                turn = np.arctan2(away[1], away[0]) - np.arctan2(bulk[1], bulk[0]) if np.linalg.norm(bulk) > 1e-3 else 0.0
+            c_, s_ = np.cos(turn), np.sin(turn)
+            rot = np.array([[c_, -s_], [s_, c_]])
+            for i in atoms:
+                pos[i] = targets[0] + (where[i] - mids[0]) @ rot.T
+        else:
+            # Several centres on one ligand (COD): the rigid fit (rotation, reflection allowed) of its alkene
+            # midpoints onto the centres; the centres then move to the fitted midpoints.
+            p0, q0 = mids.mean(axis=0), targets.mean(axis=0)
+            best = None
+            for flip in (1, -1):
+                P = (mids - p0) * np.array([1, flip])
+                u_, _, vt = np.linalg.svd(P.T @ (targets - q0))
+                d = np.sign(np.linalg.det(u_ @ vt)) or 1.0
+                rot = u_ @ np.diag([1, d]) @ vt
+                # Of the two fits (mirror images), the one with the ligand's bulk away from the metal (the COD ring
+                # beside iridium, not on top of it).
+                bulk = q0 + ((local.mean(axis=0) - p0) * np.array([1, flip])) @ rot
+                key = -np.linalg.norm(bulk - pos[metal])
+                if best is None or key < best[0]:
+                    best = (key, flip, rot)
+            _, flip, rot = best
+            for i in atoms:
+                pos[i] = q0 + ((where[i] - p0) * np.array([1, flip])) @ rot
+            for c in mine:
+                pos[c] = np.mean([pos[i] for i in centres[c]], axis=0)
+    conf = Chem.Conformer(mol.GetNumAtoms())
+    for i, (x, y) in enumerate(pos):
+        conf.SetAtomPosition(i, Point3D(float(x), float(y), 0.0))
+    mol.RemoveAllConformers()
+    mol.AddConformer(conf, assignId=True)
+    return {**result, **quality(mol)}
+
+
 def layout(mol) -> dict:
     """Compute 2D coordinates in place; returns how they were made and how good they are.
     With explicit hydrogens, the heavy-atom skeleton is laid out first (with every fix below) and the hydrogens are
     then placed around it, so the drawing with hydrogens has the same skeleton as the one without. Laying out all
     atoms at once gave a different, sometimes overlapping layout, which then wrongly triggered the cage fallback."""
+    centred = _layout_with_centres(mol)
+    if centred is not None:
+        return centred
     hydrogens = [a.GetIdx() for a in mol.GetAtoms() if a.GetAtomicNum() == 1]
     if hydrogens and len(hydrogens) < mol.GetNumAtoms():
         heavy_ids = [a.GetIdx() for a in mol.GetAtoms() if a.GetAtomicNum() != 1]
@@ -867,6 +1046,7 @@ def layout(mol) -> dict:
     if (best_q["bond_crossings"] or best_q["overlapping_atoms"] or best_q["stretched_bonds"]
             or best_q["max_bond_length_ratio"] > MAX_RATIO):
         best_q = _best_candidate(mol, best_q)
+    best_q = _place_small_ligands(mol, best_q)
     result = {"method": "rdkit", **best_q}
     if (best_q["bond_crossings"] or best_q["overlapping_atoms"]) and _is_helicene(mol):
         # A flat helicene ([6] and up) overlaps its end rings. A view of its 3D shape (as for cages) is the textbook
