@@ -59,7 +59,10 @@ mcp = FastMCP("MolTalk", instructions=INSTRUCTIONS, icons=ICONS, website_url="ht
               max_request_body_size=int(os.getenv("MOLTALK_MAX_BODY_BYTES", "65536")))
 mcp._mcp_server.version = __version__  # serverInfo.version: MolTalk's own release, not the MCP SDK's
 
-READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False, idempotentHint=True)
+def tool_annotations(title: str, *, open_world: bool = False) -> ToolAnnotations:
+    """Every MolTalk tool is read-only, non-destructive and idempotent. open_world marks tools that can reach PubChem."""
+    return ToolAnnotations(title=title, readOnlyHint=True, destructiveHint=False, openWorldHint=open_world,
+                           idempotentHint=True)
 def _ui_meta(invoking: str, invoked: str) -> dict[str, Any]:
     return {"ui": {"resourceUri": WIDGET_URI}, "openai/outputTemplate": WIDGET_URI,
             "openai/toolInvocation/invoking": invoking, "openai/toolInvocation/invoked": invoked}
@@ -73,16 +76,18 @@ def _ui_meta(invoking: str, invoked: str) -> dict[str, Any]:
 def molecule_widget() -> str:
     return WIDGET_HTML
 
-@mcp.tool(annotations=READ_ONLY)
+@mcp.tool(title="Analyze Molecule", annotations=tool_annotations("Analyze Molecule"))
 async def analyze_molecule(smiles: str) -> dict[str, Any]:
     """Validate SMILES; return identifiers, properties, CIP R/S, bond stereo, stereo_summary and SMARTS motifs. Indices are zero-based in the input molecule. Does not draw."""
     return await runner.run(analyze, smiles)
 
-@mcp.tool(annotations=READ_ONLY, meta=_ui_meta("Drawing molecule…", "Molecule drawn"))
+# Open world: naming a structure that is not in the bundled library looks its InChIKey up on PubChem.
+@mcp.tool(title="Draw Molecule", annotations=tool_annotations("Draw Molecule", open_world=True),
+          meta=_ui_meta("Drawing molecule…", "Molecule drawn"))
 async def draw_molecule(smiles: str, label: str | None = None, width: int = 640, height: int = 420,
                         numbering: str = "none", atom_indices: bool = True, hydrogens: bool = False,
                         include_svg: bool = False, ctx: Context | None = None) -> CallToolResult:
-    """Draw and render a molecule inline for the user from SMILES, in a single call. A successful result (rendered: true) means the drawing is already displayed to the user: do not call draw_molecule again with the same arguments to verify, inspect, retrieve or display it; read structuredContent instead. For a compound name, use draw_named_molecule. Returns the full analysis and depicted_stereo_bonds (this drawing's wedges/dashes, each with an explanation). label: display caption, e.g. the compound name. numbering (default "none": a clean drawing; the user can switch numbers on in the viewer): "iupac" (parent-chain/ring locants from the verified IUPAC name, when they can be determined without ambiguity; otherwise atom indices), "indices" or "none". Ask for numbers only when the discussion needs them. hydrogens=true draws every hydrogen explicitly. include_svg=true also returns the raw SVG text (only for clients without the inline viewer)."""
+    """Render a molecule from SMILES in the interactive MolTalk viewer, shown inline to the user (the drawing can be rotated in 3D). A successful result (rendered: true) is already on screen; its structuredContent holds the molecular analysis, stereochemistry and depicted_stereo_bonds (this drawing's wedges and dashes, each with an explanation). draw_named_molecule resolves a compound name and draws it in one call. label: display caption, such as the compound name; it is checked against MolTalk's library (label_check). numbering: "none" (default; the viewer can switch numbers on), "iupac" (locants from the verified IUPAC name when unambiguous, otherwise atom indices) or "indices". hydrogens=true displays every hydrogen. include_svg=true also returns the SVG, for clients without the viewer. IUPAC naming may query PubChem when the exact structure is not in MolTalk's bundled library."""
     if numbering not in ("iupac", "indices", "none"):
         raise ValueError('numbering must be "iupac", "indices" or "none".')
     if not atom_indices:
@@ -168,11 +173,11 @@ def _check_label(label: str | None, inchikey: str) -> dict | None:
     return {"status": "matches", "library_cid": same[0]["cid"],
             "message": f"The structure matches {same[0]['title']} (PubChem CID {same[0]['cid']})."}
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True),
+@mcp.tool(title="Draw Named Molecule", annotations=tool_annotations("Draw Named Molecule", open_world=True),
           meta=_ui_meta("Drawing molecule…", "Molecule drawn"))
 async def draw_named_molecule(name: str, numbering: str = "none", hydrogens: bool = False, allow_network: bool = False,
                               ctx: Context | None = None) -> CallToolResult:
-    """Use this when the user asks to draw a molecule by name ("draw cubane", "show me FAD"): it resolves the name and renders the drawing inline in one call. Do not call resolve_name first, and do not call draw_molecule afterwards unless the user asks for a modified structure. A successful result (rendered: true) is already displayed; never call again to verify it. Resolution is the same as resolve_name (MolTalk's library, then OPSIN for systematic names, then PubChem only if allow_network=true); an ambiguous or unknown name, or one that does not say which stereoisomer, is an error and nothing is drawn. numbering and hydrogens are as in draw_molecule."""
+    """Resolve a molecule name and render the resulting structure inline, in one call (for requests such as "draw cubane" or "show me FAD"). Resolution is the same as resolve_name: MolTalk's bundled library, then OPSIN for systematic names, with an optional PubChem lookup when allow_network=true. Ambiguous or unknown names, and names that do not say which stereoisomer, return an error without drawing a structure. A successful result (rendered: true) is already on screen. numbering and hydrogens are as in draw_molecule."""
     resolved = await resolve_name(name, allow_network)
     result = await draw_molecule(resolved["canonical_smiles"], label=name.strip()[:120], numbering=numbering,
                                  hydrogens=hydrogens, ctx=ctx)
@@ -204,13 +209,15 @@ def _repeated_draw(ctx, args) -> bool:
             _last_draw.pop(key, None)
     return previous is not None and previous[0] == digest and now - previous[1] < 20
 
-@mcp.tool(annotations=READ_ONLY, meta={"ui": {"visibility": ["app"]}, "openai/widgetAccessible": True,
+@mcp.tool(title="3D Conformer (viewer)", annotations=tool_annotations("3D Conformer (viewer)"),
+          meta={"ui": {"visibility": ["app"]}, "openai/widgetAccessible": True,
                                        "openai/visibility": "private"})
 async def conformer_3d(smiles: str, hydrogens: bool = False) -> dict[str, Any]:
     """Viewer-only: one calculated 3D conformer aligned to the flat drawing, used to rotate the drawing in 3D."""
     return await runner.run(conformer, smiles, hydrogens)
 
-@mcp.tool(annotations=READ_ONLY, meta=_ui_meta("Preparing structure file…", "Structure file ready"))
+@mcp.tool(title="Export Structure", annotations=tool_annotations("Export Structure"),
+          meta=_ui_meta("Preparing structure file…", "Structure file ready"))
 async def export_structure(smiles: str, format: str = "cdxml", coordinates: str | None = None, name: str | None = None,
                            hydrogens: bool = False) -> CallToolResult:
     """Write the structure as a file the user can download: format "cdxml" (ChemDraw, default), "mol", "sdf", "pdb", "xyz" or "smiles". coordinates: "2d" (the drawing's layout; default for cdxml/mol/sdf) or "3d" (one calculated conformer with explicit hydrogens; required for pdb/xyz). name: compound name for the file name and title. hydrogens=true adds explicit hydrogens to a 2D file. The file holds the structure as given (charges, stereo, atom order), not drawing-only additions. Shown inline with a Download button."""
@@ -227,14 +234,15 @@ async def export_structure(smiles: str, format: str = "cdxml", coordinates: str 
                                                                       mimeType=result["mime_type"], text=text)))
     return CallToolResult(content=content, structuredContent=result, _meta={"file_text": text})
 
-@mcp.tool(annotations=READ_ONLY)
+@mcp.tool(title="Find Substructure", annotations=tool_annotations("Find Substructure"))
 async def find_substructure(smiles: str, smarts: str) -> dict[str, Any]:
     """Find chirality-aware SMARTS matches; at most 100 matches."""
     return await runner.run(substructure, smiles, smarts)
 
-@mcp.tool(annotations=READ_ONLY, meta=_ui_meta("Enumerating stereoisomers…", "Stereoisomers shown"))
+@mcp.tool(title="Enumerate Stereoisomers", annotations=tool_annotations("Enumerate Stereoisomers"),
+          meta=_ui_meta("Enumerating stereoisomers…", "Stereoisomers shown"))
 async def enumerate_stereoisomers(smiles: str, limit: int = 16) -> CallToolResult:
-    """Enumerate unspecified stereochemistry (specified elements are preserved): R/S, E/Z, the twist of hindered biaryl and C–N axes, and the configuration of allenes, helicenes and Xabab spiro atoms. Shows the isomers inline as a grid. Each isomer has CIP labels (input atom indices), stereo_units with verified descriptors, an achiral/meso flag and its enantiomer's index. Isomers that plain SMILES cannot state are given as CXSMILES (with coordinates); pass them unchanged to draw_molecule."""
+    """Enumerate unspecified stereochemistry (specified elements are preserved): R/S, E/Z, the twist of hindered biaryl and C–N axes, and the configuration of allenes, helicenes and Xabab spiro atoms. Shows the isomers inline as a grid. Each isomer has CIP labels (input atom indices), stereo_units with verified descriptors, an achiral/meso flag and its enantiomer's index. Isomers that plain SMILES cannot state are given as CXSMILES (with coordinates), which draw_molecule accepts unchanged."""
     result = await runner.run(enumerate_stereo, smiles, limit, True)
     svgs = result.pop("svgs")
     isomers = result["isomers"]
@@ -307,16 +315,16 @@ def _verify_name_stereo(name: str, result: dict) -> None:
                          "Draw the unspecified compound by its plain name if that is acceptable, or supply a structure.")
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True))
+@mcp.tool(title="Resolve Molecule Name", annotations=tool_annotations("Resolve Molecule Name", open_world=True))
 async def resolve_name(name: str, allow_network: bool = False) -> dict[str, Any]:
-    """Resolve a compound name to a structure. Tried in order: (1) MolTalk's bundled library of thousands of common compounds (trivial names, synonyms, IUPAC names; offline); (2) OPSIN, which reads systematic IUPAC names offline, including stereodescriptors; (3) PubChem, only when allow_network=true (best effort; the name is sent to PubChem). A name shared by different structures is reported as ambiguous, not guessed. A name that states stereochemistry (R/S, E/Z, axial) must resolve to a structure that encodes it, or it is rejected as unverified. Check the returned identity and stereo_summary before relying on it."""
+    """Resolve a compound name to a structure. Tried in order: (1) MolTalk's bundled library of thousands of common compounds (trivial names, synonyms, IUPAC names; offline); (2) OPSIN, which reads systematic IUPAC names offline, including stereodescriptors; (3) PubChem, only when allow_network=true (best effort; the name is sent to PubChem). A name shared by different structures is reported as ambiguous, not guessed. A name that states stereochemistry (R/S, E/Z, axial) must resolve to a structure that encodes it, or it is rejected as unverified. The result reports the structure's source, identity and stereo_summary."""
     result = await _resolve_unverified(name, allow_network)
     _verify_name_stereo(name, result)
     return result
 
 
 async def _resolve_unverified(name: str, allow_network: bool = False) -> dict[str, Any]:
-    """Resolve a compound name to a structure. Tried in order: (1) MolTalk's bundled library of thousands of common compounds (trivial names, synonyms, IUPAC names; offline); (2) OPSIN, which reads systematic IUPAC names offline, including stereodescriptors; (3) PubChem, only when allow_network=true (best effort; the name is sent to PubChem). A name shared by different structures is reported as ambiguous, not guessed. Check the returned identity and stereo_summary before relying on it."""
+    """Resolve a compound name to a structure. Tried in order: (1) MolTalk's bundled library of thousands of common compounds (trivial names, synonyms, IUPAC names; offline); (2) OPSIN, which reads systematic IUPAC names offline, including stereodescriptors; (3) PubChem, only when allow_network=true (best effort; the name is sent to PubChem). A name shared by different structures is reported as ambiguous, not guessed. The result reports the structure's source, identity and stereo_summary."""
     from . import library
     from .naming import opsin_smiles
     name = name.strip()
