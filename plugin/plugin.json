@@ -27,43 +27,31 @@
             {
               "description": "Resolves a common compound name from MolTalk's built-in library and draws it inline with an analysis.",
               "prompt": "Using MolTalk, draw caffeine and identify its functional groups.",
-              "tools_triggered": [
-                "draw_named_molecule"
-              ],
+              "tools_triggered": "draw_named_molecule",
               "expected_behavior": "An inline MolTalk viewer shows the 2D structure of caffeine (C8H10N4O2), which can be dragged to rotate in 3D. The answer cites the source (MolTalk library, PubChem CID 2519) and lists the functional groups found, such as the aromatic ring."
             },
             {
               "description": "Reads a systematic IUPAC name with a stereodescriptor and reports which stereochemistry is specified and which is not.",
               "prompt": "Using MolTalk, draw (2R)-2-chloro-4-methylhexane and tell me whether its stereochemistry is fully specified.",
-              "tools_triggered": [
-                "draw_named_molecule"
-              ],
+              "tools_triggered": "draw_named_molecule",
               "expected_behavior": "The structure is resolved by OPSIN and drawn. The answer states that C2 is R, as the name says, and that the stereocentre at C4 is left unspecified by the name, so the stereochemistry is only partially specified."
             },
             {
               "description": "Enumerates the atropisomers of an axially chiral compound with verified descriptors.",
               "prompt": "Using MolTalk, show me the stereoisomers of BINAP.",
-              "tools_triggered": [
-                "resolve_name",
-                "enumerate_stereoisomers"
-              ],
+              "tools_triggered": "resolve_name, enumerate_stereoisomers",
               "expected_behavior": "An inline grid shows two stereoisomers of BINAP, the (Ra) and (Sa) atropisomers, identified as enantiomers of each other. The answer explains that BINAP's chirality comes from the hindered biaryl axis, not from a stereocentre."
             },
             {
               "description": "Draws a coordination complex stored in PubChem as separate pieces, assembled by electron counting.",
               "prompt": "Using MolTalk, draw ferrocene and describe its structure.",
-              "tools_triggered": [
-                "draw_named_molecule"
-              ],
+              "tools_triggered": "draw_named_molecule",
               "expected_behavior": "An inline viewer shows ferrocene as a sandwich complex: an Fe atom bonded to the centres of two cyclopentadienyl rings, which rotates in 3D with the rings parallel on either side of Fe. The answer notes Fe(II), 18 electrons, and that PubChem stores the complex as separate pieces that MolTalk joined for the picture."
             },
             {
               "description": "Draws a compound and then exports it as a ChemDraw file.",
               "prompt": "Using MolTalk, draw aspirin, then give me a ChemDraw file of it.",
-              "tools_triggered": [
-                "draw_named_molecule",
-                "export_structure"
-              ],
+              "tools_triggered": "draw_named_molecule, export_structure",
               "expected_behavior": "The aspirin structure is drawn inline, followed by a download card for a ChemDraw XML (.cdxml) file with a Download button. The file content is not pasted into the chat."
             }
           ],
@@ -84,7 +72,10 @@
         }
       },
       "publication": {
-        "release_notes": "MolTalk 1.0.0, the first public release. Resolve, verify, draw, rotate and export molecular structures in the chat: names from a curated library of 22,000 compounds, OPSIN and PubChem, never guessed; verified stereochemistry (R/S, E/Z, atropisomers, allenes, spiro compounds, helicenes); lone pairs, charges and radicals in 2D and 3D; common metal complexes in their proper geometry; and export to ChemDraw (CDXML), MOL, SDF, PDB, XYZ, SMILES, SVG and PNG. Unknown or ambiguous names are reported, not invented."
+        "release_notes": "MolTalk 1.0.0, the first public release. Resolve, verify, draw, rotate and export molecular structures in the chat: names from a curated library of 22,000 compounds, OPSIN and PubChem, never guessed; verified stereochemistry (R/S, E/Z, atropisomers, allenes, spiro compounds, helicenes); lone pairs, charges and radicals in 2D and 3D; common metal complexes in their proper geometry; and export to ChemDraw (CDXML), MOL, SDF, PDB, XYZ, SMILES, SVG and PNG. Unknown or ambiguous names are reported, not invented.",
+        "countries": [
+          "US"
+        ]
       }
     }
   },

@@ -31,8 +31,9 @@ results against authoritative sources. MolTalk does not give medical, safety or 
 
 ## Your content and results
 
-You keep any rights you have in what you send. Exported files and images are yours to use. Chemical data from PubChem
-and Wikidata remains subject to their terms.
+MolTalk does not claim ownership of the structures, files, or images you provide or generate through the service.
+Your use of outputs remains subject to applicable law and any applicable third-party data or licensing terms
+(including those of PubChem and Wikidata).
 
 ## Availability and changes
 
@@ -50,4 +51,5 @@ limitations, so some of these may not apply to you.
 
 ## Privacy and contact
 
-How data is handled is described in the [privacy policy](PRIVACY.md). Questions: see [Support](SUPPORT.md).
+How data is handled is described in the [privacy policy](PRIVACY.md). Questions: see [Support](SUPPORT.md);
+legal or privacy matters: <fico.dominic@gmail.com>.

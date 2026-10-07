@@ -3,8 +3,10 @@
 ## Getting help
 
 - **Report a problem or ask a question:** open an issue at <https://github.com/DomFico/moltalk/issues>. Include the
-  prompt you used, what you expected, and what happened. A screenshot of the drawing helps. Please do not include
-  personal or confidential information.
+  prompt you used, what you expected, and what happened. A screenshot of the drawing helps. GitHub Issues are
+  public: do not post personal, confidential, or sensitive information there.
+- **Privacy or legal requests:** do not use GitHub Issues; email <fico.dominic@gmail.com> (see the
+  [privacy policy](PRIVACY.md)).
 - **Documentation:** start with the [README](../README.md); details are in [Chemistry](CHEMISTRY.md),
   [Scope and limitations](LIMITATIONS.md) and [MCP tools and the viewer](MCP_AND_UI.md).
 
