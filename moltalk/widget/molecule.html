@@ -949,8 +949,8 @@
       }
       if (this.lifted) this.paint();  // repaint now, so the toggle feels immediate
     }
-    // Stereo labels on the flat drawing are RDKit's own annotations (class CIP_Code): R/S and E/Z where the input
-    // specifies them, and "(?)" at stereocentres and double bonds it leaves open. Each glyph is attributed to the
+    // Stereo labels on the flat drawing are RDKit's own annotations (class CIP_Code): R/S, E/Z and axial Ra/Sa where
+    // the input specifies them, and "(?)" at stereocentres, double bonds and hindered axes it leaves open. Each glyph is attributed to the
     // nearest labelled atom or bond (its midpoint), so "Specified" can hide just the "(?)" ones; "All" shows both;
     // "Off" hides every stereo label.
     updateStereoLabels() {
@@ -962,6 +962,8 @@
           ...(summary.unspecified_atoms || []).map((i) => ({ at: px[i], open: true })),
           ...(a.double_bond_stereo || []).map((b) => ({ at: mid(b.atom_indices), open: false })),
           ...(summary.unspecified_bonds || []).map((b) => ({ at: mid(b), open: true })),
+          ...(a.axial_stereo || []).map((x) => ({ at: mid(x.atom_indices), open: false })),  // Ra/Sa of a chirality axis
+          ...(summary.unspecified_axes || []).map((b) => ({ at: mid(b), open: true })),
         ].filter((anchor) => anchor.at);
         this.cipGlyphs = [...this.flatSvg.querySelectorAll(".CIP_Code")].map((node) => {
           let open = false;
@@ -1604,7 +1606,8 @@
     const grid = el("div", { class: "grid" });
     isomers.forEach((iso, i) => {
       const cip = (iso.stereocenters || []).map((c) => `${c.atom_index}${c.cip}`).join(", ");
-      const ez = (iso.double_bond_stereo || []).map((b) => b.configuration).join(", ");
+      const ez = [...(iso.double_bond_stereo || []).map((b) => b.configuration),
+                  ...(iso.axial_stereo || []).filter((x) => x.verified).map((x) => `axis ${x.cip}`)].join(", ");
       const relation = iso.achiral ? "achiral (meso)" : iso.enantiomer_index != null ? `enantiomer of #${iso.enantiomer_index}` : "";
       grid.append(el("div", { class: "card" },
         svgs[i] ? canvas(svgs[i], "Stereoisomer " + iso.smiles) : null,

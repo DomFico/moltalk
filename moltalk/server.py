@@ -15,7 +15,7 @@ from .export import export_structure as write_structure, MAX_EMBED_BYTES
 from .limits import runner
 from .naming import name_and_locants, pubchem_slot
 
-WIDGET_URI = "ui://widget/molecule-v29.html"
+WIDGET_URI = "ui://widget/molecule-v30.html"
 WIDGET_MIME = "text/html;profile=mcp-app"
 WIDGET_HTML = files("moltalk").joinpath("widget/molecule.html").read_text(encoding="utf-8")
 
@@ -30,6 +30,7 @@ INSTRUCTIONS = """RDKit chemistry tools. Workflow rules:
 - If a tool returns an error, report it; never substitute or invent a different structure.
 - If resolve_name cannot resolve a name (unknown, ambiguous, or stereo not stated), do not write a SMILES for it from memory. Tell the user what the tool said and ask for a structure, a SMILES or a more specific name. Only if the user then asks you to proceed from your own knowledge may you write the SMILES; say plainly that it is unverified by MolTalk.
 - When the user wants a structure file (ChemDraw, MOL, SDF, PDB, XYZ, SMILES), call export_structure with the verified canonical_smiles; default format cdxml for ChemDraw. 2D files use the drawing's layout; 3D files (mol/sdf with coordinates="3d", pdb, xyz) use one calculated conformer. Relay its warnings: a 3D file fixes an arbitrary configuration at any stereocentre the input leaves unspecified. The file is offered to the user by the inline viewer's Download button; do not paste the file contents unless asked.
+- Atropisomers (axial chirality, e.g. BINAP, BINOL): plain SMILES cannot state the twist. stereo_summary.unspecified_axes lists hindered axes left open; enumerate_stereoisomers returns each atropisomer as CXSMILES (coordinates plus an axis wedge) with a verified Ra/Sa (Ra = M, Sa = P). Pass that CXSMILES unchanged to draw_molecule or export_structure. Axial descriptors are reported only when verified (axial_stereo[].verified); never infer them. A name with an axial descriptor, such as (R)-BINAP, is not resolved.
 - When you pass label= to draw_molecule, use the compound's name only if the SMILES came from resolve_name for that name (or the user gave it). draw_molecule checks the label against MolTalk's library: if label_check.status is "mismatch", the drawing is NOT that compound; say so and do not present it under that name."""
 
 HOST = os.getenv("HOST", "127.0.0.1")
@@ -108,6 +109,9 @@ async def draw_molecule(smiles: str, label: str | None = None, width: int = 640,
     centers = ", ".join((f"C{c['locant']} (atom {c['atom_index']})" if c.get("locant") else f"atom {c['atom_index']}") + f" {c['cip']}"
                         for c in a["stereocenters"]) or "none assigned"
     wedges = " ".join(b["explanation"] for b in result["depicted_stereo_bonds"]) or "no wedge/dash bonds in this drawing."
+    axial = "; ".join(f"bond {x['atom_indices'][0]}-{x['atom_indices'][1]} "
+                      + (f"{x['cip']} (= {x['helicity']}, verified)" if x["verified"] else "twist specified, descriptor unverified")
+                      for x in a.get("axial_stereo", []))
     if naming["iupac_name"]:
         name_text = f"IUPAC name: {naming['iupac_name']} ({naming['name_source']}, exact structure match). "
         name_text += ("Drawing numbered with its parent-structure locants. " if shown == "iupac"
@@ -121,7 +125,8 @@ async def draw_molecule(smiles: str, label: str | None = None, width: int = 640,
         name_text = f"Note: {check['message']} " + name_text
     text = (f"Rendered {label or a['canonical_smiles']} inline for the user (already displayed; do not call again to show it). "
             f"Drew {label or a['canonical_smiles']} ({a['formula']}); canonical SMILES {a['canonical_smiles']}. " + name_text +
-            f"CIP centers (zero-based input indices): {centers}. Stereo: {a['stereo_summary']['status']}. "
+            f"CIP centers (zero-based input indices): {centers}. " + (f"Chirality axes: {axial}. " if axial else "") +
+            f"Stereo: {a['stereo_summary']['status']}. "
             f"Drawing: {wedges} Functional-group motifs: {', '.join(a['functional_groups']) or 'none matched'}.")
     depiction = result["depiction"]
     if depiction.get("note"):
@@ -223,13 +228,15 @@ async def find_substructure(smiles: str, smarts: str) -> dict[str, Any]:
 
 @mcp.tool(annotations=READ_ONLY, meta=_ui_meta("Enumerating stereoisomers…", "Stereoisomers shown"))
 async def enumerate_stereoisomers(smiles: str, limit: int = 16) -> CallToolResult:
-    """Enumerate unspecified atom/bond stereochemistry (specified centers are preserved) and show the isomers inline as a grid. Each isomer has CIP labels (input atom indices), an achiral/meso flag and its enantiomer's index."""
+    """Enumerate unspecified atom/bond stereochemistry and the twist of hindered biaryl-type axes (atropisomers; specified elements are preserved) and show the isomers inline as a grid. Each isomer has CIP labels (input atom indices), verified axial descriptors (Ra/Sa), an achiral/meso flag and its enantiomer's index. Atropisomers are given as CXSMILES, which carry the twist; pass them unchanged to draw_molecule."""
     result = await runner.run(enumerate_stereo, smiles, limit, True)
     svgs = result.pop("svgs")
     isomers = result["isomers"]
     lines = []
     for iso in isomers:
-        cip = ", ".join(f"atom {c['atom_index']} {c['cip']}" for c in iso["stereocenters"]) or "no CIP centers"
+        cip = ", ".join([f"atom {c['atom_index']} {c['cip']}" for c in iso["stereocenters"]]
+                        + [f"axis {x['atom_indices'][0]}-{x['atom_indices'][1]} {x['cip'] or 'unverified'}"
+                           for x in iso.get("axial_stereo", [])]) or "no CIP centers"
         relation = "achiral/meso" if iso["achiral"] else (f"enantiomer of #{iso['enantiomer_index']}"
                                                           if iso["enantiomer_index"] is not None else "chiral")
         lines.append(f"#{iso['index']} {iso['smiles']} ({cip}; {relation})")
@@ -265,7 +272,8 @@ def _verify_name_stereo(name: str, result: dict) -> None:
     """A name that states stereochemistry must resolve to a structure that encodes it. PubChem, for one, files
     '(R)-BINAP' under a record with no axial stereo at all; such a structure is rejected rather than drawn as if it
     were the stereoisomer asked for. Counts must be covered (each R, S, E, Z the name states must be present among
-    the structure's own CIP labels); axial chirality cannot be encoded in a SMILES at all, so it is never verified."""
+    the structure's own CIP labels). An axial descriptor is never resolved from a name: name sources give BINAP without
+    its twist, and mapping a name's (R)/(Ra) onto one atropisomer is exactly the guess this check exists to prevent."""
     wanted = _name_descriptors(name)
     if not any(wanted.values()):
         return
@@ -280,8 +288,9 @@ def _verify_name_stereo(name: str, result: dict) -> None:
     stated = ", ".join(f"{n} {k}" for k, n in wanted.items() if n)
     if wanted["axial"] or any(wanted[k] > have[k] for k in have):
         if wanted["axial"] or (wanted["R"] + wanted["S"] and not have["R"] + have["S"] and not analysis.get("stereocenters")):
-            why = ("The descriptor most likely refers to axial chirality (an atropisomer such as BINAP), which a SMILES "
-                   "or database record does not encode")
+            why = ("The descriptor most likely refers to axial chirality (an atropisomer such as BINAP); name sources "
+                   "give such compounds without their twist, and MolTalk does not assign one from a name. "
+                   "enumerate_stereoisomers on the plain compound shows both atropisomers with verified Ra/Sa")
         else:
             why = f"The structure found encodes {', '.join(f'{n} {k}' for k, n in have.items() if n) or 'no specified stereochemistry'}"
         raise ValueError(f"'{name}' states stereochemistry ({stated}) that the structure found does not have. {why}, so the "

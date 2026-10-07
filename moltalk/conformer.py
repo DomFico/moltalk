@@ -13,6 +13,7 @@ from rdkit.Geometry import Point3D
 from .depiction import _cage, layout
 from .stereo import stereogenic_unspecified, organic_stereo, assign_cip
 from .coordination import is_metal
+from . import atropisomer
 from .depiction import _chelated_metal
 
 EMBED_TIMEOUT_S = 5
@@ -651,6 +652,11 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     if site and _optional(_square_cavity, mol, site, drawn_heavy, best[1]):
         best = evaluate(mol, best[1])
         method += ", N4 cavity fitted to the metal"
+    # ETKDG embeds a specified biaryl twist, but the tail swing and chain straightening above rotate about single
+    # bonds; make sure the axis still has the verified helicity (turn one side back over if not).
+    axial = [entry for entry in atropisomer.describe(mol_in) if entry["verified"]]
+    if axial and not site and _optional(atropisomer.enforce, mol, best[1], axial):
+        best = evaluate(mol, best[1])
     (contradicted, _, rmsd), conf_id, xyz, raw, heavy_rot, heavy_scale, vsepr_lone = best
     frame_rot = heavy_rot
     to_heavy_frame = np.eye(3)
@@ -679,6 +685,13 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
                bonds=[bd.GetIdx() for bd in open_pairs if bd is not None])
 
     open_bonds = [sorted(pair) for pair in unspecified_bonds]
+    # A hindered axis the input leaves open: the model has one twist; name it (both rules must agree) as arbitrary.
+    open_axes = []
+    for bond_index in atropisomer.candidate_axes(mol_in):
+        a, b = mol_in.GetBondWithIdx(bond_index).GetBeginAtomIdx(), mol_in.GetBondWithIdx(bond_index).GetEndAtomIdx()
+        measured = atropisomer.from_geometry(mol, mol.GetConformer(conf_id), mol.GetBondBetweenAtoms(a, b))
+        open_axes.append({"atom_indices": sorted([a, b]), "cip": measured[1] if measured and
+                          {"P": "Sa", "M": "Ra"}[measured[0]] == measured[1] else None})
     kekule = Chem.Mol(drawn)
     Chem.Kekulize(kekule, clearAromaticFlags=True)
     rings = [list(r) for r in mol_in.GetRingInfo().AtomRings()]  # without metal bonds: chelate rings are not drawn rings
@@ -694,7 +707,13 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
         # conformer happens to have (marked arbitrary), like R/S at an unspecified centre.
         pair = sorted((entry["a"], entry["b"]))
         source_bond = mol_in.GetBondBetweenAtoms(*pair) if max(pair) < heavy_count else None
-        if source_bond is not None and source_bond.HasProp("_CIPCode") and source_bond.GetProp("_CIPCode") in ("E", "Z"):
+        axis = next((x for x in axial if sorted(x["atom_indices"]) == pair), None)
+        open_axis = next((x for x in open_axes if x["atom_indices"] == pair), None)
+        if axis is not None:
+            entry["cip"] = axis["cip"]  # Ra/Sa beside the axis bond, verified against this kind of 3D geometry
+        elif open_axis is not None and open_axis["cip"]:
+            entry["cip"], entry["arbitrary"] = open_axis["cip"], True
+        elif source_bond is not None and source_bond.HasProp("_CIPCode") and source_bond.GetProp("_CIPCode") in ("E", "Z"):
             entry["cip"] = source_bond.GetProp("_CIPCode")
         elif pair in open_bonds:
             model_bond = mol.GetBondBetweenAtoms(*pair)
@@ -750,11 +769,14 @@ def conformer_3d(mol_in, drawn_heavy, drawn) -> dict:
     if vsepr:
         result["note"] = result["note"] + " Expanded-octet centres use their VSEPR shape (" + ", ".join(
             drawn.GetAtomWithIdx(c).GetSymbol() for c in vsepr) + ")."
-    if unspecified or unspecified_bonds:
+    if unspecified or unspecified_bonds or open_axes:
         parts = ([f"atom(s) {', '.join(map(str, unspecified))}"] if unspecified else []) + \
-                [f"double bond {a}–{b}" for a, b in unspecified_bonds]
+                [f"double bond {a}–{b}" for a, b in unspecified_bonds] + \
+                [f"axis {x['atom_indices'][0]}–{x['atom_indices'][1]} (atropisomer twist)" for x in open_axes]
         result["arbitrary_stereo_atoms"] = unspecified
         result["arbitrary_stereo_bonds"] = unspecified_bonds
+        if open_axes:
+            result["arbitrary_stereo_axes"] = [x["atom_indices"] for x in open_axes]
         result["warning"] = (f"Stereochemistry at {'; '.join(parts)} is unspecified in the input; "
                              "this model shows one arbitrary configuration there.")
     return result

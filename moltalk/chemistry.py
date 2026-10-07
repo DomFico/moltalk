@@ -1,3 +1,5 @@
+import itertools
+
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Lipinski, rdMolDescriptors, rdCIPLabeler
 from rdkit.Chem.Draw import rdMolDraw2D
@@ -6,6 +8,7 @@ from .depiction import layout
 from .conformer import conformer_3d
 from .stereo import stereogenic_unspecified, organic_stereo, assign_cip
 from .coordination import coordinate, normalize_coordination, is_metal
+from . import atropisomer
 
 GROUPS = {"alcohol": "[OX2H][CX4]", "phenol": "[OX2H]c", "carboxylic acid": "[CX3](=O)[OX2H]",
           "ester": "[CX3](=O)[OX2][#6]", "amide": "[CX3](=O)[NX3]", "ketone": "[#6][CX3](=O)[#6]",
@@ -26,6 +29,7 @@ def parse(smiles: str):
         raise ValueError("V1 supports at most 256 atoms per molecule.")
     Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
     assign_cip(mol)
+    atropisomer.label(mol)  # an axis keeps a descriptor only if verified (Ra/Sa); RDKit's raw P/M is not shown
     return mol
 
 def _parse_error(smiles: str) -> str:
@@ -40,9 +44,10 @@ def _parse_error(smiles: str) -> str:
 
 def _stereo_summary(mol, potential) -> dict:
     real = stereogenic_unspecified(mol, potential)
+    ignored = sum(str(s.specified) == 'Unspecified' for s in potential) - len(real)
+    real |= {("axis", i) for i in atropisomer.candidate_axes(mol)}  # RDKit does not list unspecified axes at all
     specified = sum(str(s.specified) == 'Specified' for s in potential)
     unspecified = len(real)
-    ignored = sum(str(s.specified) == 'Unspecified' for s in potential) - unspecified
     if not specified and not unspecified:
         status = "no stereo elements"
     elif not unspecified:
@@ -54,7 +59,9 @@ def _stereo_summary(mol, potential) -> dict:
     summary = {"status": status, "specified": specified, "unspecified": unspecified,
                "unspecified_atoms": sorted(i for kind, i in real if kind == "atom"),
                "unspecified_bonds": sorted([mol.GetBondWithIdx(i).GetBeginAtomIdx(), mol.GetBondWithIdx(i).GetEndAtomIdx()]
-                                           for kind, i in real if kind == "bond")}
+                                           for kind, i in real if kind == "bond"),
+               "unspecified_axes": sorted([mol.GetBondWithIdx(i).GetBeginAtomIdx(), mol.GetBondWithIdx(i).GetEndAtomIdx()]
+                                          for kind, i in real if kind == "axis")}
     if ignored:
         summary["non_stereogenic_ignored"] = ignored  # e.g. adamantane bridgeheads: flipping them changes nothing
     return summary
@@ -77,11 +84,20 @@ def analyze(smiles: str) -> dict:
     warnings = []
     if summary["unspecified"]:
         warnings.append("Some stereochemistry is unspecified; no unique stereoisomer is implied.")
+    if summary["unspecified_axes"]:
+        warnings.append("Hindered axis (atropisomerism) with its twist unspecified at bond(s) "
+                        + ", ".join(f"{a}-{b}" for a, b in summary["unspecified_axes"])
+                        + ": at least three ortho positions are substituted or fused, so the Ra and Sa atropisomers are "
+                          "normally separable. Plain SMILES cannot state the twist; enumerate_stereoisomers gives both "
+                          "as CXSMILES.")
+    axial = atropisomer.describe(mol)
+    if axial:
+        warnings.append("InChI/InChIKey do not encode axial chirality: both atropisomers share this InChIKey.")
     if len(Chem.GetMolFrags(mol)) > 1:
         warnings.append("Input has disconnected fragments; properties describe the entire input.")
     if mol.GetStereoGroups():
         warnings.append("Enhanced stereo groups are present; consult CXSMILES for relative/group semantics.")
-    return {"canonical_smiles": Chem.MolToSmiles(mol, isomericSmiles=True),
+    return {"canonical_smiles": atropisomer.canonical_smiles(mol),
             "cxsmiles": Chem.MolToCXSmiles(mol), "inchi": Chem.MolToInchi(mol),
             "inchikey": Chem.MolToInchiKey(mol), "formula": rdMolDescriptors.CalcMolFormula(mol),
             "atom_index_base": 0, "properties": {"molecular_weight": Descriptors.MolWt(mol),
@@ -89,7 +105,7 @@ def analyze(smiles: str) -> dict:
             "tpsa_angstrom2": rdMolDescriptors.CalcTPSA(mol), "h_bond_donors": Lipinski.NumHDonors(mol),
             "h_bond_acceptors": Lipinski.NumHAcceptors(mol), "rotatable_bonds": Lipinski.NumRotatableBonds(mol),
             "formal_charge": Chem.GetFormalCharge(mol)}, "stereocenters": centers,
-            "double_bond_stereo": doubles, "potential_stereo": stereo,
+            "double_bond_stereo": doubles, "axial_stereo": axial, "potential_stereo": stereo,
             "stereo_summary": summary,
             "functional_groups": {k:v for k,v in groups.items() if v},
             "functional_group_note": "SMARTS motifs can overlap; this is not an exhaustive chemical classification.",
@@ -99,7 +115,8 @@ def _atom_name(i: int, locants: dict | None) -> str:
     locant = (locants or {}).get(str(i))
     return f"C{locant}, atom {i}" if locant else f"atom {i}"
 
-def _svg(mol, width: int, height: int, atom_indices: bool, locants: dict | None = None, open_atoms=(), open_bonds=()):
+def _svg(mol, width: int, height: int, atom_indices: bool, locants: dict | None = None, open_atoms=(), open_bonds=(),
+         open_axes=()):
     """Depict an already-parsed molecule; returns the SVG, the drawing's wedge/dash bonds and layout quality.
     open_atoms: stereocentres the input leaves unspecified; RDKit annotates them "(?)" in the same style and with the
     same collision-avoiding placement as R/S (the viewer shows them only when asked for all stereo labels)."""
@@ -109,7 +126,7 @@ def _svg(mol, width: int, height: int, atom_indices: bool, locants: dict | None 
     for i in open_atoms:
         if i < original_atoms and not mol.GetAtomWithIdx(i).HasProp("_CIPCode"):
             mol.GetAtomWithIdx(i).SetProp("_CIPCode", "?")
-    for a, b in open_bonds:  # an unspecified double bond: "(?)" where E/Z would be
+    for a, b in [*open_bonds, *open_axes]:  # an unspecified double bond or axis: "(?)" where E/Z or Ra/Sa would be
         bond = mol.GetBondBetweenAtoms(a, b)
         if bond is not None and not bond.HasProp("_CIPCode"):
             bond.SetProp("_CIPCode", "?")
@@ -128,11 +145,27 @@ def _svg(mol, width: int, height: int, atom_indices: bool, locants: dict | None 
     drawer.FinishDrawing()
     atom_px = [[round(drawer.GetDrawCoords(i).x, 2), round(drawer.GetDrawCoords(i).y, 2)] for i in range(original_atoms)]
     bonds = []
+    axes = {}
+    for axis in atropisomer.specified_axes(mol):
+        axes[axis.GetBeginAtomIdx()] = axes[axis.GetEndAtomIdx()] = axis
     for b in mol.GetBonds():
         if b.GetBondDir() not in (Chem.BondDir.BEGINWEDGE, Chem.BondDir.BEGINDASH):
             continue
         start, end = b.GetBeginAtom(), b.GetEndAtom()
         kind = "wedge" if b.GetBondDir() == Chem.BondDir.BEGINWEDGE else "dash"
+        axis = axes.get(start.GetIdx())
+        if axis is not None and start.GetChiralTag() == Chem.ChiralType.CHI_UNSPECIFIED and b.GetIdx() != axis.GetIdx():
+            other = axis.GetOtherAtomIdx(start.GetIdx())
+            cip = axis.GetProp('_CIPCode') if axis.HasProp('_CIPCode') else None
+            bonds.append({"bond_index": b.GetIdx(), "from_atom": start.GetIdx(), "to_atom": end.GetIdx(),
+                          "depiction": str(b.GetBondDir()), "style": kind, "axis_atoms": [start.GetIdx(), other],
+                          "axial_cip": cip, "to_element": end.GetSymbol(),
+                          "explanation": f"{kind.capitalize()} at the chirality axis {_atom_name(start.GetIdx(), locants)}–"
+                                         f"{_atom_name(other, locants)}{f' ({cip})' if cip else ''}: this ring bond points "
+                                         f"{'toward' if kind == 'wedge' else 'away from'} the viewer, so the ring on "
+                                         f"{_atom_name(start.GetIdx(), locants)} is twisted out of the drawing plane "
+                                         "relative to the other ring. It marks the twist of the axis, not a stereocentre."})
+            continue
         cip = start.GetProp('_CIPCode') if start.HasProp('_CIPCode') else None
         end_label = f"{end.GetSymbol()} ({_atom_name(end.GetIdx(), locants)})"
         if end.GetIdx() >= original_atoms:
@@ -214,7 +247,8 @@ def draw(smiles: str, width: int = 640, height: int = 420, atom_indices: bool = 
     analysis = analyze(smiles)
     svg, bonds, depiction, atom_px = _svg(mol, width, height, atom_indices, locants,
                                           analysis["stereo_summary"]["unspecified_atoms"],
-                                          analysis["stereo_summary"]["unspecified_bonds"])
+                                          analysis["stereo_summary"]["unspecified_bonds"],
+                                          analysis["stereo_summary"]["unspecified_axes"])
     if coordination_note:
         depiction["coordination_note"] = coordination_note
     return {"svg": svg, "atom_px": atom_px, "drawn_bonds": drawn_bonds, "lone_pairs": electron_map, "depicted_stereo_bonds": bonds, "depiction": depiction, "note": WEDGE_NOTE,
@@ -233,41 +267,54 @@ def substructure(smiles: str, smarts: str) -> dict:
         raise ValueError("Invalid SMARTS query.")
     return {"atom_index_base": 0, "matches": [list(x) for x in parse(smiles).GetSubstructMatches(query, useChirality=True, maxMatches=100)]}
 
-def _mirror_smiles(mol) -> str:
+def _mirror_key(mol) -> str:
     mirror = Chem.Mol(mol)
     for atom in mirror.GetAtoms():
         if atom.GetChiralTag() in (Chem.ChiralType.CHI_TETRAHEDRAL_CW, Chem.ChiralType.CHI_TETRAHEDRAL_CCW):
             atom.InvertChirality()
-    return Chem.MolToSmiles(mirror, isomericSmiles=True)
+    return atropisomer.stereo_key(atropisomer.mirror_axes(mirror))
 
 def enumerate_stereo(smiles: str, limit: int = 16, with_drawings: bool = False) -> dict:
     if not 1 <= limit <= 64:
         raise ValueError("limit must be between 1 and 64.")
     options = StereoEnumerationOptions(onlyUnassigned=True, unique=True, maxIsomers=limit + 1)
-    # Enumerated molecules keep the input atom order, so indices below are input indices.
+    # Enumerated molecules keep the input atom order, so indices below are input indices. RDKit does not enumerate
+    # unspecified hindered axes (it cannot detect them without a wedge), so each isomer is expanded with both twists
+    # of every axis atropisomer.candidate_axes finds.
+    input_mol = parse(smiles)
+    axes = atropisomer.candidate_axes(input_mol)
+    twists = list(itertools.product(atropisomer.FLIP, repeat=len(axes)))
     found = {}
-    for m in EnumerateStereoisomers(parse(smiles), options=options):
-        found.setdefault(Chem.MolToSmiles(m, isomericSmiles=True), m)
+    for m in EnumerateStereoisomers(Chem.Mol(input_mol), options=options):
+        for twist in twists:
+            iso = atropisomer.with_axes(m, dict(zip(axes, twist)))
+            found.setdefault(atropisomer.stereo_key(iso), iso)
+        if len(found) > limit:
+            break
     values = sorted(found)
     rank = {s: i for i, s in enumerate(values[:limit])}
     isomers, drawings = [], []
-    for i, smi in enumerate(values[:limit]):
-        mol = found[smi]
+    for i, key in enumerate(values[:limit]):
+        mol = found[key]
         Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
         assign_cip(mol)
-        mirror = _mirror_smiles(mol)
-        isomers.append({"index": i, "smiles": smi, "inchikey": Chem.MolToInchiKey(mol),
+        axial = atropisomer.label(mol)
+        mirror = _mirror_key(mol)
+        isomers.append({"index": i, "smiles": atropisomer.canonical_smiles(mol), "inchikey": Chem.MolToInchiKey(mol),
                         "stereocenters": [{"atom_index": a.GetIdx(), "element": a.GetSymbol(), "cip": a.GetProp('_CIPCode')}
                                           for a in mol.GetAtoms() if a.HasProp('_CIPCode')],
                         "double_bond_stereo": [{"atom_indices": [b.GetBeginAtomIdx(), b.GetEndAtomIdx()], "configuration": b.GetProp('_CIPCode')}
-                                               for b in mol.GetBonds() if b.HasProp('_CIPCode')],
-                        "achiral": mirror == smi, "enantiomer_index": rank.get(mirror) if mirror != smi else None})
+                                               for b in mol.GetBonds() if b.HasProp('_CIPCode') and b.GetBondType() == Chem.BondType.DOUBLE],
+                        "axial_stereo": axial,
+                        "achiral": mirror == key, "enantiomer_index": rank.get(mirror) if mirror != key else None})
         if with_drawings and i < MAX_DRAWN_ISOMERS:
             drawings.append(_svg(Chem.Mol(mol), 320, 260, True)[0])
     input_mol = parse(smiles)
     result = {"input_smiles": smiles, "input_stereo_summary": _stereo_summary(input_mol, organic_stereo(input_mol, Chem.FindPotentialStereo(input_mol))),
               "isomers": isomers, "truncated": len(values) > limit, "atom_index_base": 0,
-              "note": "Enumerates unspecified stereochemistry; does not certify conformational feasibility. "
+              "note": "Enumerates unspecified stereochemistry, including the twist (Ra/Sa) of hindered biaryl-type axes, "
+                      "whose isomers are given as CXSMILES (plain SMILES cannot state a twist); does not certify "
+                      "conformational feasibility. "
                       "'achiral' marks an isomer identical to its mirror image (e.g. meso); "
                       "isomers that are neither the same nor enantiomers are diastereomers."}
     if with_drawings:

@@ -11,6 +11,7 @@ from io import StringIO
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdChemDraw
 
+from . import atropisomer
 from .chemistry import conformer, parse
 from .depiction import layout
 
@@ -37,7 +38,8 @@ def _with_3d(smiles: str):
     mol = Chem.AddHs(parse(smiles))
     model = conformer(smiles, True)
     atoms = model["atoms"]
-    arbitrary = {"atoms": model.get("arbitrary_stereo_atoms", []), "bonds": model.get("arbitrary_stereo_bonds", [])}
+    arbitrary = {"atoms": model.get("arbitrary_stereo_atoms", []), "bonds": model.get("arbitrary_stereo_bonds", []),
+                 "axes": model.get("arbitrary_stereo_axes", [])}
     if len(atoms) == mol.GetNumAtoms() and all(a["element"] == mol.GetAtomWithIdx(i).GetSymbol() for i, a in enumerate(atoms)):
         conf = Chem.Conformer(mol.GetNumAtoms())
         for i, a in enumerate(atoms):
@@ -75,7 +77,7 @@ def export_structure(smiles: str, fmt: str = "cdxml", coordinates: str | None = 
     if coordinates not in allowed:
         raise ValueError(f"{description} files support {' or '.join(allowed)} coordinates, not {coordinates!r}.")
     mol = parse(smiles)
-    canonical = Chem.MolToSmiles(mol, isomericSmiles=True)
+    canonical = atropisomer.canonical_smiles(mol)  # CXSMILES when an axis twist must be carried
     title = (name or canonical)[:80]
     warnings, notes = [], []
 
@@ -99,9 +101,10 @@ def export_structure(smiles: str, fmt: str = "cdxml", coordinates: str | None = 
         mol.SetProp("_Name", title)
         notes.append(f"3D coordinates: one calculated conformer ({method}), with explicit hydrogens; "
                      "not a measured or unique structure.")
-        if arbitrary["atoms"] or arbitrary["bonds"]:
+        if arbitrary["atoms"] or arbitrary["bonds"] or arbitrary["axes"]:
             parts = ([f"atom(s) {', '.join(map(str, arbitrary['atoms']))}"] if arbitrary["atoms"] else []) + \
-                    [f"double bond {a}-{b}" for a, b in arbitrary["bonds"]]
+                    [f"double bond {a}-{b}" for a, b in arbitrary["bonds"]] + \
+                    [f"the axis {a}-{b} (atropisomer twist)" for a, b in arbitrary["axes"]]
             warnings.append(f"The input leaves stereochemistry unspecified at {'; '.join(parts)}. A 3D file must fix "
                             "a configuration there, so this file contains one arbitrary choice; it is not implied by "
                             "the input. Specify the stereochemistry, or export in 2D, if it matters.")
